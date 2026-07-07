@@ -5,6 +5,7 @@ import sys
 import json
 import fcntl
 import pwd
+import time
 from pathlib import Path
 
 # ===== Debug =====
@@ -130,6 +131,7 @@ def default_config():
         "last_on_percent": 100,
         "autonomous": False,
         "profiles": {},
+        "idle_timeout_seconds": 12,
     }
 
 
@@ -188,6 +190,7 @@ def load_config():
     cfg.setdefault("last_on_percent", defaults["last_on_percent"])
     cfg.setdefault("autonomous", defaults["autonomous"])
     cfg.setdefault("profiles", defaults["profiles"])
+    cfg.setdefault("idle_timeout_seconds", defaults["idle_timeout_seconds"])
 
     try:
         r, g, b = hex_to_rgb(cfg["color"])
@@ -206,6 +209,11 @@ def load_config():
         cfg["last_on_percent"] = defaults["last_on_percent"]
 
     cfg["autonomous"] = bool(cfg["autonomous"])
+
+    try:
+        cfg["idle_timeout_seconds"] = clamp(int(cfg["idle_timeout_seconds"]), 1, 600)
+    except (TypeError, ValueError):
+        cfg["idle_timeout_seconds"] = defaults["idle_timeout_seconds"]
 
     if not isinstance(cfg["profiles"], dict):
         cfg["profiles"] = {}
@@ -719,6 +727,44 @@ def cmd_restore(cfg, devinfo):
     save_config(cfg)
 
 
+def cmd_startup(cfg):
+    """Day/night keyboard brightness handler (ported from vrgb-login-brightness.sh).
+
+    Night (21:00-05:00): restore last saved color + brightness.
+    Day: force 0% so backlight stays off.
+    Also ensures firmware autonomous mode is off.
+    """
+    hour = time.localtime().tm_hour
+    is_night = hour >= 21 or hour <= 5
+
+    print(f"[vrgb-startup] {'NIGHT' if is_night else 'DAY'}")
+
+    devinfo = find_device()
+    set_firmware_mode(devinfo, False)
+    time.sleep(0.2)
+
+    if is_night:
+        print("→ Night: restoring last-on state")
+        cmd_restore(cfg, devinfo)
+    else:
+        print("→ Day: forcing 0% (backlight stays off)")
+        color = cfg.get("color", "ff0000")
+        r, g, b = hex_to_rgb(color)
+        set_color(devinfo, r, g, b, 0)
+        cfg["percent"] = 0
+        save_config(cfg)
+
+    print("[vrgb-startup] Finished. Current:")
+    # quick status
+    try:
+        s = load_config()
+        print(f"Saved color: #{s.get('color', '??????')}")
+        print(f"Saved brightness: {s.get('percent', 0)} %")
+        print(f"Last-on brightness: {s.get('last_on_percent', 0)} %")
+    except Exception:
+        pass
+
+
 # ===== Main =====
 
 
@@ -741,6 +787,7 @@ def main():
   vrgb rainbow on|off
   vrgb off
   vrgb restore
+  vrgb startup          # day/night: night restore, day force 0%
   vrgb profile save NAME
   vrgb profile load NAME
   vrgb profile list
@@ -766,6 +813,7 @@ Example: vrgb --debug status
         "off",
         "restore",
         "profile",
+        "startup",
         "about",
     }
 
@@ -832,6 +880,9 @@ Example: vrgb --debug status
             cmd_profile_delete(cfg, args[2])
         else:
             die("profile requires a subcommand: save, load, list, or delete")
+
+    elif cmd == "startup":
+        cmd_startup(cfg)
 
     elif cmd == "about":
         cmd_about()

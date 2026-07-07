@@ -65,6 +65,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QLabel,
     QSlider,
+    QSpinBox,
     QPushButton,
     QLineEdit,
     QListWidget,
@@ -422,6 +423,17 @@ class DeviceWorker(QThread):
         except SystemExit:
             self.op_done.emit("rainbow", False, "OEM rainbow not supported on this device")
 
+    def _op_set_idle_timeout(self, mod, seconds):
+        try:
+            sec = max(1, min(600, int(seconds)))
+            cfg = self._cfg()
+            cfg["idle_timeout_seconds"] = sec
+            mod.save_config(cfg)
+            self._emit_cfg(cfg)
+            self.op_done.emit("idle_timeout", True, f"Auto-dimming delay set to {sec}s")
+        except Exception as e:
+            self.op_done.emit("idle_timeout", False, str(e))
+
     def _op_profile_save(self, mod, name):
         cfg = self._cfg()
         mod.cmd_profile_save(cfg, name)
@@ -758,6 +770,21 @@ class MainWindow(QMainWindow):
         sgl.addWidget(self.auto_tray_chk)
         root.addWidget(sbox)
 
+        # Auto-dimming timeout (for keyboard backlight idle)
+        tbox = QGroupBox("Auto-dimming on inactivity")
+        tgl = QGridLayout(tbox)
+        self.idle_enable_chk = QCheckBox("Enable auto dim after inactivity")
+        self.idle_enable_chk.setToolTip("Turn off backlight after the chosen delay when no keys/mouse activity")
+        tgl.addWidget(self.idle_enable_chk, 0, 0, 1, 2)
+        tgl.addWidget(QLabel("Delay:"), 1, 0)
+        self.idle_spin = QSpinBox()
+        self.idle_spin.setRange(1, 600)
+        self.idle_spin.setValue(12)
+        self.idle_spin.setSuffix(" seconds")
+        self.idle_spin.setToolTip("Seconds of inactivity before dimming the keyboard backlight")
+        tgl.addWidget(self.idle_spin, 1, 1)
+        root.addWidget(tbox)
+
         self.setCentralWidget(central)
 
         self._dev_widgets = [
@@ -782,6 +809,8 @@ class MainWindow(QMainWindow):
         self.profile_list.itemDoubleClicked.connect(lambda _i: self._profile_load())
         self.auto_restore_chk.toggled.connect(lambda on: self._toggle_autostart("restore", on))
         self.auto_tray_chk.toggled.connect(lambda on: self._toggle_autostart("tray", on))
+        self.idle_enable_chk.toggled.connect(self._on_idle_changed)
+        self.idle_spin.valueChanged.connect(self._on_idle_changed)
 
     def _wire_worker(self):
         self.worker.op_done.connect(self._on_op_done)
@@ -813,6 +842,14 @@ class MainWindow(QMainWindow):
         self.power_btn.setText("On" if self._brightness_b > 0 else "Off")
         self.auto_chk.setChecked(bool(cfg.get("autonomous", False)))
         self._reload_profiles(cfg)
+        idle_sec = int(cfg.get("idle_timeout_seconds", 12))
+        self.idle_spin.blockSignals(True)
+        self.idle_spin.setValue(idle_sec)
+        self.idle_spin.blockSignals(False)
+        self.idle_enable_chk.blockSignals(True)
+        self.idle_enable_chk.setChecked(idle_sec > 0)
+        self.idle_spin.setEnabled(idle_sec > 0)
+        self.idle_enable_chk.blockSignals(False)
         self._suppress = False
 
     def _reload_profiles(self, cfg):
@@ -926,6 +963,15 @@ class MainWindow(QMainWindow):
         if self._suppress:
             return
         self.worker.submit("rainbow", bool(checked))
+
+    def _on_idle_changed(self):
+        if self._suppress:
+            return
+        enabled = self.idle_enable_chk.isChecked()
+        sec = self.idle_spin.value() if enabled else 0
+        self.idle_spin.setEnabled(enabled)
+        # save via worker (will update config and emit)
+        self.worker.submit("set_idle_timeout", sec)
 
     # -- autostart --
     def _load_autostart_state(self):
