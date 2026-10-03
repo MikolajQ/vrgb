@@ -1,0 +1,5 @@
+# vrgb: non-root access to the ASUS Vivobook ITE5570 keyboard (HID LampArray).
+# uaccess grants the locally logged-in user access (no relogin needed);
+# the vrgb group keeps working for remote/headless use.
+# Must sort before 73-seat-late.rules for the uaccess tag to apply.
+SUBSYSTEM=="hidraw", KERNELS=="i2c-ITE5570*", MODE="0660", GROUP="vrgb", TAG+="uaccess"

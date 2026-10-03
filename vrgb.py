@@ -88,8 +88,9 @@ ASUS_WMI_DEV_ID = ASUS_WMI_BASE / "dev_id"
 ASUS_WMI_CTRL_PARAM = ASUS_WMI_BASE / "ctrl_param"
 ASUS_WMI_DEVS = ASUS_WMI_BASE / "devs"
 
-VERSION = "0.3.5"
-PROJECT_URL = "https://github.com/vrgb-dev/vrgb"
+VERSION = "0.4.0"
+PROJECT_URL = "https://github.com/MikolajQ/vrgb"
+UPSTREAM_URL = "https://github.com/vrgb-dev/vrgb"
 
 # ===== Utilities =====
 
@@ -705,6 +706,8 @@ Version: """
         + """
 """
         + PROJECT_URL
+        + " (maintained fork)\nOriginal project: "
+        + UPSTREAM_URL
         + """
 
 No kernel mods. No daemon. Just HID.

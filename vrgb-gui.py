@@ -13,7 +13,8 @@ Design:
     Polkit and runs as root. Live "preview" drags are best-effort and silently skipped
     in that case (to avoid password spam) until the group is active.
 
-    The pkexec fallback ONLY ever runs the root-owned /usr/local/bin/vrgb binary; it
+    The pkexec fallback ONLY ever runs a root-owned system copy of the CLI
+    (/usr/bin/vrgb from a package, or /usr/local/bin/vrgb from ./install.sh); it
     never runs a user-writable script as root. The CLI honours PKEXEC_UID so the
     elevated run reads/writes the invoking user's ~/.config/vrgb, not /root's.
 
@@ -97,10 +98,14 @@ from PyQt6.QtWidgets import (
 # Locate + import the vrgb core script as a module
 # ----------------------------------------------------------------------------
 
+# System locations of the CLI: distro package first, then ./install.sh.
+SYSTEM_CLI_PATHS = (Path("/usr/bin/vrgb"), Path("/usr/local/bin/vrgb"))
+
+
 def _core_candidates():
     here = Path(__file__).resolve().parent
     return [
-        Path("/usr/local/bin/vrgb"),   # installed CLI (preferred)
+        *SYSTEM_CLI_PATHS,             # installed CLI (preferred)
         here / "vrgb.py",              # running from the repo checkout
     ]
 
@@ -123,19 +128,20 @@ def pkexec_target():
     """A SAFE root-owned binary to run under pkexec, or None.
 
     Running a user-writable file as root is a local privilege-escalation primitive,
-    so we require /usr/local/bin/vrgb to exist, be owned by root, and not be group-
-    or world-writable. We never fall back to the (user-owned) repo checkout.
+    so we require a system copy of the CLI that is owned by root and not group- or
+    world-writable. We never fall back to the (user-owned) repo checkout.
     """
-    p = Path("/usr/local/bin/vrgb")
-    try:
-        st = p.stat()
-    except OSError:
-        return None
-    if st.st_uid != 0:
-        return None
-    if st.st_mode & 0o022:          # group/other writable -> unsafe
-        return None
-    return str(p)
+    for p in SYSTEM_CLI_PATHS:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_uid != 0:
+            continue
+        if st.st_mode & 0o022:      # group/other writable -> unsafe
+            continue
+        return str(p)
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -196,19 +202,21 @@ class Autostart:
     """
 
     DIR = Path.home() / ".config" / "autostart"
+    # Exec uses bare command names (resolved via PATH) so entries keep working
+    # whether vrgb was installed by a package (/usr/bin) or ./install.sh.
     ENTRIES = {
         "restore": {
             "file": "vrgb.desktop",
             "name": "VRGB Restore",
             "comment": "Restore keyboard RGB state on login (off by day if daytime-off is on)",
-            "exec": "/usr/local/bin/vrgb startup",
+            "exec": "vrgb startup",
             "icon": "vrgb",
         },
         "tray": {
             "file": "vrgb-gui.desktop",
             "name": "VRGB (tray)",
             "comment": "Keyboard RGB control tray applet",
-            "exec": "/usr/local/bin/vrgb-gui --tray",
+            "exec": "vrgb-gui --tray",
             "icon": "vrgb",
         },
     }
@@ -253,6 +261,27 @@ class Autostart:
                 p.unlink()
             except FileNotFoundError:
                 pass
+
+    @classmethod
+    def migrate(cls):
+        """Rewrite enabled entries whose Exec points at a binary that no longer
+        exists (e.g. /usr/local/bin after switching to the distro package)."""
+        for key in cls.ENTRIES:
+            if not cls.is_enabled(key):
+                continue
+            try:
+                text = cls.path(key).read_text(errors="ignore")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if line.startswith("Exec="):
+                    cmd = line[5:].split()[0] if line[5:].split() else ""
+                    if cmd.startswith("/") and not Path(cmd).exists():
+                        try:
+                            cls.set_enabled(key, True)
+                        except OSError:
+                            pass
+                    break
 
 
 # ----------------------------------------------------------------------------
@@ -383,8 +412,8 @@ class DeviceWorker(QThread):
         """Privileged fallback via pkexec (Polkit GUI password prompt)."""
         if not self.pkexec_bin:
             raise RuntimeError(
-                "Privileged fallback unavailable: install the vrgb CLI to "
-                "/usr/local/bin (run ./install.sh), then log out and back in."
+                "Privileged fallback unavailable: install the vrgb CLI system-wide "
+                "(distro package or ./install.sh), then log out and back in."
             )
         self._proc = subprocess.Popen(
             ["pkexec", self.pkexec_bin, *cli_args],
@@ -1516,6 +1545,8 @@ def main():
     except FileNotFoundError as exc:
         QMessageBox.critical(None, "VRGB GUI", str(exc))
         return 1
+
+    Autostart.migrate()
 
     worker = DeviceWorker(mod)
     worker.start()

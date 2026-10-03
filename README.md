@@ -4,6 +4,13 @@
   RGB control for ASUS Vivobook HID LampArray keyboards on Linux<br>
 </p>
 
+> **Maintained fork.** This is a community-maintained continuation of
+> [vrgb-dev/vrgb](https://github.com/vrgb-dev/vrgb), which has had no activity
+> since May 2026 (open pull requests unanswered). It includes the PyQt6 GUI by
+> Matt Warner ([@mrw1986](https://github.com/mrw1986), upstream PR #6), idle
+> auto-off and daytime-off. All credit for the original tool goes to vrgb-dev.
+> If upstream becomes active again, changes will be offered back.
+
 
 
 ## Overview
@@ -54,7 +61,7 @@ Unlike some RGB tools, VRGB does not rely on kernel patches, vendor utilities, b
        ↓
     RGB lighting
 
-Current Stable Release: v0.3.5
+Current Stable Release: v0.4.0
     
 
 ## Example Usage
@@ -153,9 +160,20 @@ https://github.com/vrgb-dev/vrgb/issues/1
 
 ## Quick Install
 
+**Arch Linux / CachyOS / Manjaro (AUR)**
+
+    paru -S vrgb-gui      # GUI + tray (pulls in the vrgb CLI)
+    paru -S vrgb          # CLI only
+
+The package installs a udev rule that gives the logged-in user access to the
+keyboard right away (no group change or relogin needed). Enable the tray at
+login from the GUI ("Start at login").
+
+**Other distributions**
+
 Clone the repository and run the installer.
 
-    git clone https://github.com/vrgb-dev/vrgb.git
+    git clone https://github.com/MikolajQ/vrgb.git
     cd vrgb
     chmod +x install.sh
     ./install.sh
@@ -354,13 +372,27 @@ Removes:
 - ~~simple GUI frontend~~ — added (`vrgb-gui`, PyQt6)
 - ~~color picker / brightness control~~ — added
 - ~~profile management~~ — added (CLI + GUI)
-- packaged distribution (RPM / Flatpak)
+- ~~packaged distribution~~ — AUR (`vrgb`, `vrgb-gui`); RPM / Flatpak welcome
+- idle detection outside GNOME (KDE, wlroots compositors)
 
 With future updates in mind, this project will aim to continue to be as efficient and lightweight as possible.
 
 
 
 ## Changelog
+
+v0.4.0 (maintained fork)
+
+- PyQt6 GUI with tray (by @mrw1986, upstream PR #6)
+- idle auto-off: event-driven via GNOME Mutter IdleMonitor, restores on input
+  without touching the saved brightness (upstream issue #5)
+- daytime-off: keeps the backlight off between sunrise and sunset at a configured
+  location; sun times computed locally, location suggested from the timezone
+- `vrgb startup` honours daytime-off; GUI autostart uses it
+- tray follows external config changes (CLI, editor) via inotify
+- lower idle resource use (no polling worker, FN keys via brightness_hw_changed)
+- atomic config writes
+- packaging: /usr/bin paths, udev `uaccess` rule, AUR packages `vrgb` / `vrgb-gui`
 
 v0.3.5
 
@@ -411,8 +443,10 @@ Initial prototype with static RGB and brightness control.
 
 ## License
 
-MIT License
+MIT License — see [LICENSE](LICENSE).
 
 ## Repository
 
-https://github.com/vrgb-dev/vrgb
+https://github.com/MikolajQ/vrgb (maintained fork)
+
+Original project: https://github.com/vrgb-dev/vrgb
