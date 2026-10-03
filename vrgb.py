@@ -88,7 +88,7 @@ ASUS_WMI_DEV_ID = ASUS_WMI_BASE / "dev_id"
 ASUS_WMI_CTRL_PARAM = ASUS_WMI_BASE / "ctrl_param"
 ASUS_WMI_DEVS = ASUS_WMI_BASE / "devs"
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROJECT_URL = "https://github.com/MikolajQ/vrgb"
 UPSTREAM_URL = "https://github.com/vrgb-dev/vrgb"
 

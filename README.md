@@ -61,7 +61,7 @@ Unlike some RGB tools, VRGB does not rely on kernel patches, vendor utilities, b
        ↓
     RGB lighting
 
-Current Stable Release: v0.4.0
+Current Stable Release: v0.5.0
     
 
 ## Example Usage
@@ -405,6 +405,15 @@ With future updates in mind, this project will aim to continue to be as efficien
 
 ## Changelog
 
+v0.5.0
+
+- idle auto-off beyond GNOME: Wayland `ext-idle-notify-v1` (KDE Plasma, sway,
+  Hyprland, labwc/wayfire for LXQt, niri, COSMIC) and X11 (XScreenSaver);
+  tested on GNOME, KWin, sway and Xvfb
+- single instance (`vrgb-gui` shows the running window, `--quit` stops it)
+- `--tray` keeps running in the background when there is no system tray
+- systemd user unit `vrgb-gui.service` for sessions without XDG autostart
+
 v0.4.0 (maintained fork)
 
 - PyQt6 GUI with tray (by @mrw1986, upstream PR #6)
@@ -417,10 +426,6 @@ v0.4.0 (maintained fork)
 - lower idle resource use (no polling worker, FN keys via brightness_hw_changed)
 - atomic config writes
 - packaging: /usr/bin paths, udev `uaccess` rule, AUR packages `vrgb` / `vrgb-gui`
-- idle auto-off beyond GNOME: Wayland `ext-idle-notify-v1` (KDE Plasma, sway,
-  Hyprland, labwc/wayfire, niri, COSMIC) and X11 (XScreenSaver)
-- single instance (`vrgb-gui` shows the running window, `--quit` stops it);
-  background mode without a system tray; systemd user unit `vrgb-gui.service`
 
 v0.3.5
 
