@@ -1,0 +1,17 @@
+[Unit]
+Description=VRGB keyboard RGB tray and automation (idle auto-off, daytime-off)
+Documentation=https://github.com/MikolajQ/vrgb
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+# Reapply the saved lighting (or keep it off by day) before the tray starts.
+ExecStartPre=-/usr/bin/vrgb startup
+ExecStart=/usr/bin/vrgb-gui --tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

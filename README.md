@@ -216,15 +216,39 @@ config logic are shared with the command line — no duplicated device code.
 - Falls back to a Polkit (`pkexec`) password prompt if the `vrgb` group is not yet
   active in your session (i.e. before the first logout/login after install)
 - **Automatic off** (runs inside the tray process, so keep the tray running):
-  - *Turn off after inactivity* — event-driven through GNOME's
-    `org.gnome.Mutter.IdleMonitor` (no polling); the backlight returns on the next
-    key/mouse input. Only the live HID intensity changes, the saved brightness stays.
+  - *Turn off after inactivity* — the backlight returns on the next key/mouse
+    input. Only the live HID intensity changes, the saved brightness stays.
+    Idle detection is picked automatically:
+
+    | Session | Backend |
+    |---|---|
+    | GNOME | Mutter IdleMonitor (D-Bus, event-driven) |
+    | KDE Plasma (Wayland), sway, Hyprland, labwc / wayfire (LXQt), niri, COSMIC | Wayland `ext-idle-notify-v1` (event-driven, no extra dependencies) |
+    | X11 sessions (LXQt, XFCE, KDE X11, …) | XScreenSaver extension (`libXss`); checks only when the timeout could have passed |
+
   - *Keep off during daytime* — between sunrise and sunset at the configured
     location the backlight is switched off and it comes back at sunset if it was on.
     Sun times are computed locally (no network). The location is suggested offline
     from the system timezone's reference city (e.g. `Europe/Warsaw` → Warsaw); adjust
     latitude/longitude if you live far from it. `vrgb startup` honours the same
     setting at login.
+
+**Running it on every desktop**
+
+- Only one copy runs: starting `vrgb-gui` again opens the window of the running
+  one; `vrgb-gui --quit` stops it.
+- `vrgb-gui --tray` keeps running in the background even without a system tray
+  (e.g. sway without a bar), so the automation still works.
+- Login autostart: the GUI's "Start at login" writes XDG autostart entries
+  (GNOME, KDE, LXQt, XFCE, Cinnamon, …). On compositors without XDG autostart
+  (sway, Hyprland, labwc without it, …) either add `exec vrgb-gui --tray` to the
+  compositor config, or — if your session starts `graphical-session.target`
+  (e.g. via uwsm) — enable the bundled user service:
+
+      systemctl --user enable --now vrgb-gui.service
+
+  The tray icon needs a StatusNotifierItem host (KDE/LXQt/XFCE panels, waybar's
+  `tray` module, or the AppIndicator extension on GNOME).
 
 **Install (after `./install.sh`)**
 
@@ -373,7 +397,7 @@ Removes:
 - ~~color picker / brightness control~~ — added
 - ~~profile management~~ — added (CLI + GUI)
 - ~~packaged distribution~~ — AUR (`vrgb`, `vrgb-gui`); RPM / Flatpak welcome
-- idle detection outside GNOME (KDE, wlroots compositors)
+- ~~idle detection outside GNOME~~ — added (Wayland ext-idle-notify, X11)
 
 With future updates in mind, this project will aim to continue to be as efficient and lightweight as possible.
 
@@ -393,6 +417,10 @@ v0.4.0 (maintained fork)
 - lower idle resource use (no polling worker, FN keys via brightness_hw_changed)
 - atomic config writes
 - packaging: /usr/bin paths, udev `uaccess` rule, AUR packages `vrgb` / `vrgb-gui`
+- idle auto-off beyond GNOME: Wayland `ext-idle-notify-v1` (KDE Plasma, sway,
+  Hyprland, labwc/wayfire, niri, COSMIC) and X11 (XScreenSaver)
+- single instance (`vrgb-gui` shows the running window, `--quit` stops it);
+  background mode without a system tray; systemd user unit `vrgb-gui.service`
 
 v0.3.5
 
