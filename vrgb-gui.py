@@ -51,7 +51,7 @@ import importlib.util
 import importlib.machinery
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QThread, QObject, QSocketNotifier, pyqtSignal, pyqtSlot, QPointF, QMetaType
+from PyQt6.QtCore import Qt, QTimer, QThread, QObject, QSocketNotifier, QFileSystemWatcher, pyqtSignal, pyqtSlot, QPointF, QMetaType
 from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage, QDBusArgument
 from PyQt6.QtGui import (
     QColor,
@@ -794,6 +794,19 @@ class MainWindow(QMainWindow):
             if self._hw_notifier is None:
                 self._fw_timer.start()   # no notification support: keep polling
 
+        # Pick up config changes made outside this process (CLI, `vrgb startup`, an
+        # editor). The directory is watched because saves replace the file atomically.
+        self._cfg_mtime = self._config_mtime()
+        self._cfg_watch = QFileSystemWatcher(self)
+        self._cfg_reload = QTimer(self)
+        self._cfg_reload.setSingleShot(True)
+        self._cfg_reload.setInterval(200)
+        self._cfg_reload.timeout.connect(self._reload_external_cfg)
+        cfg_dir = Path(getattr(mod, "CONFIG_DIR", ""))
+        if cfg_dir.is_dir():
+            self._cfg_watch.addPath(str(cfg_dir))
+            self._cfg_watch.directoryChanged.connect(lambda _p: self._cfg_reload.start())
+
         self.worker.submit("detect")
 
     # ---- unified brightness math ----
@@ -1152,6 +1165,19 @@ class MainWindow(QMainWindow):
         if self._suppress:
             return
         self.worker.submit("rainbow", bool(checked))
+
+    def _config_mtime(self):
+        try:
+            return self.mod.CONFIG_FILE.stat().st_mtime_ns
+        except (OSError, AttributeError):
+            return None
+
+    def _reload_external_cfg(self):
+        mtime = self._config_mtime()
+        if mtime is None or mtime == self._cfg_mtime:
+            return
+        self._cfg_mtime = mtime
+        self.worker.config_updated.emit(self.mod.load_config())
 
     # -- automation (idle dimming + daytime off) --
     def _suggested_location(self):
