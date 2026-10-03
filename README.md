@@ -182,7 +182,8 @@ config logic are shared with the command line — no duplicated device code.
 - Unified brightness slider (0–100%) that is **tied to the FN+F4 / FN+F3 keys**: it
   decomposes brightness into the firmware backlight step (`asus::kbd_backlight`, set
   via logind) and vrgb's HID intensity so the two layers never double-dim, and it
-  polls the firmware level so the hardware keys move the slider too. Falls back to
+  follows the firmware level (via the kernel's `brightness_hw_changed` notification,
+  polling only while the window is open) so the hardware keys move the slider too. Falls back to
   pure-HID brightness if the LED node / logind is unavailable.
 - A power on/off toggle
 - Firmware/autonomous mode toggle
@@ -196,6 +197,16 @@ config logic are shared with the command line — no duplicated device code.
   support embedded slider/widget items.)
 - Falls back to a Polkit (`pkexec`) password prompt if the `vrgb` group is not yet
   active in your session (i.e. before the first logout/login after install)
+- **Automatic off** (runs inside the tray process, so keep the tray running):
+  - *Turn off after inactivity* — event-driven through GNOME's
+    `org.gnome.Mutter.IdleMonitor` (no polling); the backlight returns on the next
+    key/mouse input. Only the live HID intensity changes, the saved brightness stays.
+  - *Keep off during daytime* — between sunrise and sunset at the configured
+    location the backlight is switched off and it comes back at sunset if it was on.
+    Sun times are computed locally (no network). The location is suggested offline
+    from the system timezone's reference city (e.g. `Europe/Warsaw` → Warsaw); adjust
+    latitude/longitude if you live far from it. `vrgb startup` honours the same
+    setting at login.
 
 **Install (after `./install.sh`)**
 
@@ -249,6 +260,10 @@ Turn Lighting Off
 Restore Saved State
 
     vrgb restore
+
+Login Restore (keeps the light off while the sun is up if daytime-off is enabled)
+
+    vrgb startup
 
 Enable firmware lighting (Firmware Autonomous Mode)
 

@@ -6,6 +6,8 @@ import json
 import fcntl
 import pwd
 import time
+import math
+import datetime as _dt
 from pathlib import Path
 
 # ===== Debug =====
@@ -132,6 +134,11 @@ def default_config():
         "autonomous": False,
         "profiles": {},
         "idle_timeout_seconds": 12,
+        "idle_enabled": True,
+        "day_off_enabled": False,
+        "latitude": None,
+        "longitude": None,
+        "day_forced_off": False,
     }
 
 
@@ -191,6 +198,8 @@ def load_config():
     cfg.setdefault("autonomous", defaults["autonomous"])
     cfg.setdefault("profiles", defaults["profiles"])
     cfg.setdefault("idle_timeout_seconds", defaults["idle_timeout_seconds"])
+    for key in ("idle_enabled", "day_off_enabled", "latitude", "longitude", "day_forced_off"):
+        cfg.setdefault(key, defaults[key])
 
     try:
         r, g, b = hex_to_rgb(cfg["color"])
@@ -215,6 +224,15 @@ def load_config():
     except (TypeError, ValueError):
         cfg["idle_timeout_seconds"] = defaults["idle_timeout_seconds"]
 
+    cfg["idle_enabled"] = bool(cfg["idle_enabled"])
+    cfg["day_off_enabled"] = bool(cfg["day_off_enabled"])
+    cfg["day_forced_off"] = bool(cfg["day_forced_off"])
+    try:
+        cfg["latitude"] = clamp(float(cfg["latitude"]), -90.0, 90.0)
+        cfg["longitude"] = clamp(float(cfg["longitude"]), -180.0, 180.0)
+    except (TypeError, ValueError):
+        cfg["latitude"] = cfg["longitude"] = None
+
     if not isinstance(cfg["profiles"], dict):
         cfg["profiles"] = {}
     else:
@@ -231,8 +249,129 @@ def load_config():
 
 
 def save_config(cfg):
+    # Atomic replace: the GUI, `vrgb startup` and pkexec runs can write concurrently,
+    # and a torn write would make load_config() discard the whole config.
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    tmp = CONFIG_FILE.with_name(f".{CONFIG_FILE.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    if os.geteuid() == 0:
+        # Elevated (sudo/pkexec) run: keep the file owned by the real user.
+        try:
+            st = CONFIG_DIR.stat()
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+    os.replace(tmp, CONFIG_FILE)
+
+
+# ===== Sun position (daytime-off) =====
+
+
+def _sun_event_utc(date, lat, lon, rising, zenith=90.833):
+    """UTC datetime of sunrise/sunset on `date` (Almanac for Computers algorithm).
+
+    Returns True if the sun never sets that day (polar day), False if it never
+    rises (polar night). Accuracy is ~1-2 minutes, plenty for a backlight.
+    """
+    rad, deg = math.radians, math.degrees
+    n = date.timetuple().tm_yday
+    lng_hour = lon / 15.0
+    t = n + ((6 if rising else 18) - lng_hour) / 24.0
+    m = 0.9856 * t - 3.289
+    l = (m + 1.916 * math.sin(rad(m)) + 0.020 * math.sin(rad(2 * m)) + 282.634) % 360
+    ra = deg(math.atan(0.91764 * math.tan(rad(l)))) % 360
+    ra += (l // 90) * 90 - (ra // 90) * 90
+    ra /= 15.0
+    sin_dec = 0.39782 * math.sin(rad(l))
+    cos_dec = math.cos(math.asin(sin_dec))
+    cos_h = (math.cos(rad(zenith)) - sin_dec * math.sin(rad(lat))) / (cos_dec * math.cos(rad(lat)))
+    if cos_h > 1:
+        return False
+    if cos_h < -1:
+        return True
+    h = deg(math.acos(cos_h))
+    h = (360 - h if rising else h) / 15.0
+    ut = (h + ra - 0.06571 * t - 6.622 - lng_hour) % 24
+    midnight = _dt.datetime(date.year, date.month, date.day, tzinfo=_dt.timezone.utc)
+    return midnight + _dt.timedelta(hours=ut)
+
+
+def sun_times(lat, lon, date=None):
+    """(sunrise, sunset) as local-time datetimes, or a bool for polar day/night."""
+    date = date or _dt.date.today()
+    rise = _sun_event_utc(date, lat, lon, True)
+    sett = _sun_event_utc(date, lat, lon, False)
+    if isinstance(rise, bool) or isinstance(sett, bool):
+        return rise if isinstance(rise, bool) else sett
+    if sett < rise:
+        sett += _dt.timedelta(days=1)
+    return rise.astimezone(), sett.astimezone()
+
+
+def is_daytime(lat, lon, now=None):
+    now = now or _dt.datetime.now().astimezone()
+    times = sun_times(lat, lon, now.date())
+    if isinstance(times, bool):
+        return times
+    rise, sett = times
+    return rise <= now < sett
+
+
+def local_timezone_name():
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if tz and "/" in tz and not tz.startswith("/"):
+        return tz
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        return None
+    marker = "/zoneinfo/"
+    return target.split(marker, 1)[1] if marker in target else None
+
+
+def _parse_iso6709(coord):
+    """'+5215+02100' / '+405042-0735258' -> (lat, lon) in degrees."""
+    split = max(coord.rfind("+"), coord.rfind("-"))
+    out = []
+    for part, deg_digits in ((coord[:split], 2), (coord[split:], 3)):
+        sign = -1 if part[0] == "-" else 1
+        digits = part[1:]
+        d = int(digits[:deg_digits])
+        mnt = int(digits[deg_digits:deg_digits + 2] or 0)
+        sec = int(digits[deg_digits + 2:] or 0)
+        out.append(sign * (d + mnt / 60 + sec / 3600))
+    return round(out[0], 4), round(out[1], 4)
+
+
+def guess_location():
+    """Suggest (lat, lon, label) from the system timezone — offline and free.
+
+    Uses the reference city of the tz database zone (e.g. Europe/Warsaw -> Warsaw).
+    Returns None if the zone cannot be resolved.
+    """
+    tz = local_timezone_name()
+    if not tz:
+        return None
+    for tab in ("/usr/share/zoneinfo/zone1970.tab", "/usr/share/zoneinfo/zone.tab"):
+        try:
+            with open(tab, encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        continue
+                    cols = line.rstrip("\n").split("\t")
+                    if len(cols) >= 3 and cols[2] == tz:
+                        lat, lon = _parse_iso6709(cols[1])
+                        return lat, lon, tz
+        except (OSError, ValueError, IndexError):
+            continue
+    return None
+
+
+def day_off_active(cfg, now=None):
+    """True when the daytime-off option is on, a location is set and it is day."""
+    if not cfg.get("day_off_enabled") or cfg.get("latitude") is None:
+        return False
+    return is_daytime(cfg["latitude"], cfg["longitude"], now)
 
 
 # Config semantics:
@@ -728,41 +867,33 @@ def cmd_restore(cfg, devinfo):
 
 
 def cmd_startup(cfg):
-    """Day/night keyboard brightness handler (ported from vrgb-login-brightness.sh).
+    """Login handler: restore the saved lighting, honouring the daytime-off option.
 
-    Night (21:00-05:00): restore last saved color + brightness.
-    Day: force 0% so backlight stays off.
-    Also ensures firmware autonomous mode is off.
+    If "day_off_enabled" is set and the sun is up at the configured location, the
+    backlight is switched off (remembered via "day_forced_off" so it comes back at
+    sunset / next night login). Otherwise the saved state is restored.
     """
-    hour = time.localtime().tm_hour
-    is_night = hour >= 21 or hour <= 5
-
-    print(f"[vrgb-startup] {'NIGHT' if is_night else 'DAY'}")
-
     devinfo = find_device()
-    set_firmware_mode(devinfo, False)
-    time.sleep(0.2)
-
-    if is_night:
-        print("→ Night: restoring last-on state")
+    if cfg.get("autonomous", False):
         cmd_restore(cfg, devinfo)
-    else:
-        print("→ Day: forcing 0% (backlight stays off)")
-        color = cfg.get("color", "ff0000")
-        r, g, b = hex_to_rgb(color)
-        set_color(devinfo, r, g, b, 0)
-        cfg["percent"] = 0
-        save_config(cfg)
+        return
 
-    print("[vrgb-startup] Finished. Current:")
-    # quick status
-    try:
-        s = load_config()
-        print(f"Saved color: #{s.get('color', '??????')}")
-        print(f"Saved brightness: {s.get('percent', 0)} %")
-        print(f"Last-on brightness: {s.get('last_on_percent', 0)} %")
-    except Exception:
-        pass
+    if day_off_active(cfg):
+        print("[vrgb-startup] DAY: backlight off (daytime-off option)")
+        # Only remember "we turned it off" if it was on; a user-chosen 0 % stays 0 %.
+        forced = cfg.get("day_forced_off") or cfg.get("percent", 0) > 0
+        cmd_off(cfg, devinfo)
+        cfg["day_forced_off"] = forced
+        save_config(cfg)
+    else:
+        print("[vrgb-startup] restoring saved state")
+        cfg["day_forced_off"] = False
+        cmd_restore(cfg, devinfo)
+
+    s = load_config()
+    print(f"Saved color: #{s.get('color', '??????')}")
+    print(f"Saved brightness: {s.get('percent', 0)} %")
+    print(f"Last-on brightness: {s.get('last_on_percent', 0)} %")
 
 
 # ===== Main =====
@@ -787,7 +918,7 @@ def main():
   vrgb rainbow on|off
   vrgb off
   vrgb restore
-  vrgb startup          # day/night: night restore, day force 0%
+  vrgb startup          # login restore; off while the sun is up if day-off is enabled
   vrgb profile save NAME
   vrgb profile load NAME
   vrgb profile list

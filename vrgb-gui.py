@@ -28,6 +28,14 @@ Unified brightness:
   (and the HID intensity) too. If the LED node or logind is unavailable the GUI falls
   back to pure-HID brightness (B == I).
 
+Automation (runs inside this process, so the tray must be running):
+  * Idle dimming — event-driven via GNOME Mutter's IdleMonitor D-Bus watches (no
+    polling). Dimming/restoring only touches the HID intensity and never the saved
+    config, so the sliders keep showing the user's real brightness.
+  * Daytime off — while the sun is up at the configured location (computed locally,
+    see vrgb.sun_times) the backlight is switched off; it comes back at sunset if it
+    was on before. The location is suggested from the system timezone.
+
 State (color / intensity / profiles / autonomous) lives in ~/.config/vrgb/config.json,
 read through the imported module's load_config().
 """
@@ -43,7 +51,8 @@ import importlib.util
 import importlib.machinery
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPointF
+from PyQt6.QtCore import Qt, QTimer, QThread, QObject, QSocketNotifier, pyqtSignal, pyqtSlot, QPointF, QMetaType
+from PyQt6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage, QDBusArgument
 from PyQt6.QtGui import (
     QColor,
     QConicalGradient,
@@ -66,6 +75,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QSlider,
     QSpinBox,
+    QDoubleSpinBox,
     QPushButton,
     QLineEdit,
     QListWidget,
@@ -181,7 +191,7 @@ class Autostart:
     """Create/remove the per-user XDG autostart .desktop entries.
 
     Two independent entries:
-      * 'restore' -> reapply the saved lighting at login (`vrgb restore`)
+      * 'restore' -> reapply the saved lighting at login (`vrgb startup`)
       * 'tray'    -> start the GUI minimised to the tray (`vrgb-gui --tray`)
     """
 
@@ -190,8 +200,8 @@ class Autostart:
         "restore": {
             "file": "vrgb.desktop",
             "name": "VRGB Restore",
-            "comment": "Restore keyboard RGB state on login",
-            "exec": "/usr/local/bin/vrgb restore",
+            "comment": "Restore keyboard RGB state on login (off by day if daytime-off is on)",
+            "exec": "/usr/local/bin/vrgb startup",
             "icon": "vrgb",
         },
         "tray": {
@@ -246,6 +256,68 @@ class Autostart:
 
 
 # ----------------------------------------------------------------------------
+# Session idle detection (GNOME Mutter IdleMonitor, event-driven)
+# ----------------------------------------------------------------------------
+
+class IdleMonitor(QObject):
+    """Emits `idle` once the user has been inactive for the timeout, then `active`
+    on the next input. Both are Mutter watches, so nothing is polled."""
+
+    idle = pyqtSignal()
+    active = pyqtSignal()
+
+    SERVICE = "org.gnome.Mutter.IdleMonitor"
+    PATH = "/org/gnome/Mutter/IdleMonitor/Core"
+    IFACE = "org.gnome.Mutter.IdleMonitor"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bus = QDBusConnection.sessionBus()
+        self._iface = QDBusInterface(self.SERVICE, self.PATH, self.IFACE, self._bus)
+        self.available = self._iface.isValid() and self._bus.connect(
+            self.SERVICE, self.PATH, self.IFACE, "WatchFired", self._on_fired)
+        self._timeout_ms = 0
+        self._idle_id = None
+        self._active_id = None
+
+    def _call_id(self, method, *args):
+        reply = self._iface.call(method, *args)
+        if reply.type() != QDBusMessage.MessageType.ReplyMessage or not reply.arguments():
+            return None
+        return int(reply.arguments()[0])
+
+    def _remove(self, watch_id):
+        if watch_id is not None:
+            self._iface.call("RemoveWatch", QDBusArgument(watch_id, QMetaType.Type.UInt.value))
+
+    def set_timeout(self, ms):
+        """(Re)arm the idle watch; 0 disables it."""
+        if not self.available or ms == self._timeout_ms:
+            return
+        self._timeout_ms = ms
+        self._remove(self._idle_id)
+        self._idle_id = None
+        if ms > 0:
+            self._idle_id = self._call_id(
+                "AddIdleWatch", QDBusArgument(ms, QMetaType.Type.ULongLong.value))
+
+    def watch_active(self):
+        """One-shot: emit `active` on the next user input."""
+        if self.available and self._active_id is None:
+            self._active_id = self._call_id("AddUserActiveWatch")
+
+    @pyqtSlot(QDBusMessage)
+    def _on_fired(self, msg):
+        args = msg.arguments()
+        watch_id = int(args[0]) if args else None
+        if watch_id is not None and watch_id == self._idle_id:
+            self.idle.emit()
+        elif watch_id is not None and watch_id == self._active_id:
+            self._active_id = None       # user-active watches are one-shot
+            self.active.emit()
+
+
+# ----------------------------------------------------------------------------
 # Worker thread: serializes all device I/O off the UI thread
 # ----------------------------------------------------------------------------
 
@@ -280,10 +352,7 @@ class DeviceWorker(QThread):
     # -- internals (run on the worker thread) --
     def run(self):
         while self._running:
-            try:
-                op, args = self.q.get(timeout=0.25)
-            except queue.Empty:
-                continue
+            op, args = self.q.get()      # blocks; stop() enqueues "quit" to wake us
             if op == "quit":
                 break
             try:
@@ -423,16 +492,72 @@ class DeviceWorker(QThread):
         except SystemExit:
             self.op_done.emit("rainbow", False, "OEM rainbow not supported on this device")
 
-    def _op_set_idle_timeout(self, mod, seconds):
+    SETTING_KEYS = ("idle_enabled", "idle_timeout_seconds", "day_off_enabled",
+                    "latitude", "longitude")
+
+    def _op_settings(self, mod, values):
+        cfg = self._cfg()
+        cfg.update({k: v for k, v in values.items() if k in self.SETTING_KEYS})
+        mod.save_config(cfg)
+        cfg = self._cfg()                # re-normalise (clamping etc.)
+        self._emit_cfg(cfg)
+        self.op_done.emit("settings", True, "Settings saved")
+
+    # Idle dim/restore only drive the HID intensity; the saved config is untouched.
+    def _op_idle_dim(self, mod):
+        cfg = self._cfg()
+        if cfg.get("autonomous") or cfg.get("percent", 0) <= 0:
+            return
         try:
-            sec = max(1, min(600, int(seconds)))
-            cfg = self._cfg()
-            cfg["idle_timeout_seconds"] = sec
-            mod.save_config(cfg)
-            self._emit_cfg(cfg)
-            self.op_done.emit("idle_timeout", True, f"Auto-dimming delay set to {sec}s")
-        except Exception as e:
-            self.op_done.emit("idle_timeout", False, str(e))
+            dev = self._ensure_device()
+            r, g, b = mod.hex_to_rgb(cfg["color"])
+            mod.set_firmware_mode(dev, False)
+            mod.set_color(dev, r, g, b, 0)
+        except (SystemExit, PermissionError):
+            pass
+
+    def _op_idle_restore(self, mod):
+        cfg = self._cfg()
+        if cfg.get("autonomous") or cfg.get("percent", 0) <= 0:
+            return
+        try:
+            dev = self._ensure_device()
+            r, g, b = mod.hex_to_rgb(cfg["color"])
+            mod.set_firmware_mode(dev, False)
+            mod.set_color(dev, r, g, b, mod.percent_to_intensity(cfg["percent"]))
+        except (SystemExit, PermissionError):
+            pass
+
+    # Daytime off persists (like the Off button) and remembers that it did so, so
+    # sunset only brings back a backlight the user actually had on.
+    def _op_day_off(self, mod):
+        cfg = self._cfg()
+        if cfg.get("autonomous") or cfg.get("percent", 0) <= 0:
+            return
+        try:
+            dev = self._ensure_device()
+            mod.cmd_off(cfg, dev)
+        except (SystemExit, PermissionError):
+            return
+        cfg["day_forced_off"] = True
+        mod.save_config(cfg)
+        self._emit_cfg(cfg)
+        self.op_done.emit("day_off", True, "Daytime: backlight off until sunset")
+
+    def _op_day_on(self, mod):
+        cfg = self._cfg()
+        if not cfg.get("day_forced_off"):
+            return
+        cfg["day_forced_off"] = False
+        if cfg.get("percent", 0) <= 0:
+            try:
+                dev = self._ensure_device()
+                mod.cmd_restore(cfg, dev)
+            except (SystemExit, PermissionError):
+                pass
+        mod.save_config(cfg)
+        self._emit_cfg(cfg)
+        self.op_done.emit("day_on", True, "Backlight restored")
 
     def _op_profile_save(self, mod, name):
         cfg = self._cfg()
@@ -628,6 +753,15 @@ class MainWindow(QMainWindow):
         cfg = mod.load_config()
         self._color = QColor("#" + cfg.get("color", "aa00ff"))
 
+        # Automation: idle dimming + daytime off
+        self._auto = {}                  # last applied automation settings
+        self._dimmed = False
+        self._day_state = None           # None = not evaluated yet
+        self._suggested = mod.guess_location()
+        self.idle_mon = IdleMonitor(self)
+        self.idle_mon.idle.connect(self._on_user_idle)
+        self.idle_mon.active.connect(self._on_user_active)
+
         self._build_ui()
         self._wire_worker()
 
@@ -637,15 +771,28 @@ class MainWindow(QMainWindow):
         self._preview.timeout.connect(self._emit_preview)
         self._pending = None             # (hex, hid_percent)
 
+        # Wall-clock check once a minute (QTimer is monotonic and pauses in suspend,
+        # so a single long timer to sunrise/sunset would fire late after resume).
+        self._day_timer = QTimer(self)
+        self._day_timer.setInterval(60_000)
+        self._day_timer.timeout.connect(self._check_day)
+        self._day_timer.start()
+
         self._load_from_cfg(cfg)
         self._load_autostart_state()
 
-        # Poll the firmware backlight so FN+F4/F3 move the slider too.
+        # Follow FN+F4/F3. The kernel signals key-driven changes through
+        # brightness_hw_changed (sysfs_notify -> POLLPRI), so in the tray we sleep
+        # until it fires; the 300 ms poll only runs while the window is visible.
+        self._fw_timer = QTimer(self)
+        self._fw_timer.setInterval(300)
+        self._fw_timer.timeout.connect(self._poll_firmware)
+        self._hw_notifier = None
+        self._hw_fd = None
         if self.kbd.available:
-            self._fw_timer = QTimer(self)
-            self._fw_timer.setInterval(300)
-            self._fw_timer.timeout.connect(self._poll_firmware)
-            self._fw_timer.start()
+            self._watch_hw_changed()
+            if self._hw_notifier is None:
+                self._fw_timer.start()   # no notification support: keep polling
 
         self.worker.submit("detect")
 
@@ -668,6 +815,8 @@ class MainWindow(QMainWindow):
         return int(round(fw_level * hid_percent / self.kbd.max))
 
     def _set_firmware(self, level):
+        if level == self._expected_fw:
+            return                       # each change spawns busctl; skip no-ops
         self._expected_fw = level
         self._fw_ignore_until = time.monotonic() + 0.6
         self.worker.submit("fwlevel", level)
@@ -763,26 +912,60 @@ class MainWindow(QMainWindow):
         sbox = QGroupBox("Start at login")
         sgl = QVBoxLayout(sbox)
         self.auto_restore_chk = QCheckBox("Restore my lighting at login")
-        self.auto_restore_chk.setToolTip("Runs `vrgb restore` on login (color can reset on a full power cycle)")
+        self.auto_restore_chk.setToolTip("Runs `vrgb startup` on login (color can reset on a full power cycle)")
         self.auto_tray_chk = QCheckBox("Start the tray icon at login")
         self.auto_tray_chk.setToolTip("Launches this app minimised to the system tray on login")
         sgl.addWidget(self.auto_restore_chk)
         sgl.addWidget(self.auto_tray_chk)
         root.addWidget(sbox)
 
-        # Auto-dimming timeout (for keyboard backlight idle)
-        tbox = QGroupBox("Auto-dimming on inactivity")
+        # Automation: idle dimming + daytime off
+        tbox = QGroupBox("Automatic off")
         tgl = QGridLayout(tbox)
-        self.idle_enable_chk = QCheckBox("Enable auto dim after inactivity")
-        self.idle_enable_chk.setToolTip("Turn off backlight after the chosen delay when no keys/mouse activity")
+        self.idle_enable_chk = QCheckBox("Turn off after inactivity")
+        self.idle_enable_chk.setToolTip(
+            "Switch the backlight off when no keys/mouse are used; it comes back on the next input")
         tgl.addWidget(self.idle_enable_chk, 0, 0, 1, 2)
-        tgl.addWidget(QLabel("Delay:"), 1, 0)
         self.idle_spin = QSpinBox()
         self.idle_spin.setRange(1, 600)
         self.idle_spin.setValue(12)
-        self.idle_spin.setSuffix(" seconds")
-        self.idle_spin.setToolTip("Seconds of inactivity before dimming the keyboard backlight")
-        tgl.addWidget(self.idle_spin, 1, 1)
+        self.idle_spin.setSuffix(" s")
+        self.idle_spin.setToolTip("Seconds of inactivity before the backlight goes off")
+        tgl.addWidget(self.idle_spin, 0, 2, 1, 2)
+
+        self.day_chk = QCheckBox("Keep off during daytime (sunrise → sunset)")
+        self.day_chk.setToolTip(
+            "While the sun is up at the location below the backlight stays off; "
+            "it comes back at sunset if it was on")
+        tgl.addWidget(self.day_chk, 1, 0, 1, 4)
+
+        tgl.addWidget(QLabel("Location"), 2, 0)
+        self.lat_spin = QDoubleSpinBox()
+        self.lat_spin.setRange(-90.0, 90.0)
+        self.lat_spin.setDecimals(4)
+        self.lat_spin.setPrefix("lat ")
+        self.lat_spin.setSuffix("°")
+        self.lon_spin = QDoubleSpinBox()
+        self.lon_spin.setRange(-180.0, 180.0)
+        self.lon_spin.setDecimals(4)
+        self.lon_spin.setPrefix("lon ")
+        self.lon_spin.setSuffix("°")
+        for sp in (self.lat_spin, self.lon_spin):
+            sp.setKeyboardTracking(False)   # valueChanged only once editing is done
+        tgl.addWidget(self.lat_spin, 2, 1)
+        tgl.addWidget(self.lon_spin, 2, 2)
+        self.suggest_btn = QPushButton("Suggest")
+        self.suggest_btn.setToolTip("Use the reference city of the system timezone (offline)")
+        self.suggest_btn.setEnabled(self._suggested_location() is not None)
+        tgl.addWidget(self.suggest_btn, 2, 3)
+
+        self.sun_lbl = QLabel("")
+        self.sun_lbl.setStyleSheet("color:#999;")
+        self.sun_lbl.setWordWrap(True)
+        tgl.addWidget(self.sun_lbl, 3, 0, 1, 4)
+        if not self.idle_mon.available:
+            self.idle_enable_chk.setToolTip(
+                "Idle detection needs GNOME (org.gnome.Mutter.IdleMonitor), not found")
         root.addWidget(tbox)
 
         self.setCentralWidget(central)
@@ -809,8 +992,12 @@ class MainWindow(QMainWindow):
         self.profile_list.itemDoubleClicked.connect(lambda _i: self._profile_load())
         self.auto_restore_chk.toggled.connect(lambda on: self._toggle_autostart("restore", on))
         self.auto_tray_chk.toggled.connect(lambda on: self._toggle_autostart("tray", on))
-        self.idle_enable_chk.toggled.connect(self._on_idle_changed)
-        self.idle_spin.valueChanged.connect(self._on_idle_changed)
+        self.idle_enable_chk.toggled.connect(self._on_automation_changed)
+        self.idle_spin.valueChanged.connect(self._on_automation_changed)
+        self.day_chk.toggled.connect(self._on_automation_changed)
+        self.lat_spin.valueChanged.connect(self._on_automation_changed)
+        self.lon_spin.valueChanged.connect(self._on_automation_changed)
+        self.suggest_btn.clicked.connect(self._suggest_location)
 
     def _wire_worker(self):
         self.worker.op_done.connect(self._on_op_done)
@@ -842,15 +1029,17 @@ class MainWindow(QMainWindow):
         self.power_btn.setText("On" if self._brightness_b > 0 else "Off")
         self.auto_chk.setChecked(bool(cfg.get("autonomous", False)))
         self._reload_profiles(cfg)
-        idle_sec = int(cfg.get("idle_timeout_seconds", 12))
-        self.idle_spin.blockSignals(True)
-        self.idle_spin.setValue(idle_sec)
-        self.idle_spin.blockSignals(False)
-        self.idle_enable_chk.blockSignals(True)
-        self.idle_enable_chk.setChecked(idle_sec > 0)
-        self.idle_spin.setEnabled(idle_sec > 0)
-        self.idle_enable_chk.blockSignals(False)
+        self.idle_enable_chk.setChecked(bool(cfg.get("idle_enabled", True)))
+        self.idle_spin.setValue(int(cfg.get("idle_timeout_seconds", 12)))
+        self.day_chk.setChecked(bool(cfg.get("day_off_enabled", False)))
+        lat, lon = cfg.get("latitude"), cfg.get("longitude")
+        if lat is None and self._suggested_location() is not None:
+            lat, lon, _label = self._suggested_location()
+        if lat is not None:
+            self.lat_spin.setValue(lat)
+            self.lon_spin.setValue(lon)
         self._suppress = False
+        self._apply_automation(cfg)
 
     def _reload_profiles(self, cfg):
         self.profile_list.clear()
@@ -964,14 +1153,84 @@ class MainWindow(QMainWindow):
             return
         self.worker.submit("rainbow", bool(checked))
 
-    def _on_idle_changed(self):
+    # -- automation (idle dimming + daytime off) --
+    def _suggested_location(self):
+        return self._suggested
+
+    def _suggest_location(self):
+        sug = self._suggested_location()
+        if sug is None:
+            return
+        self._suppress = True
+        self.lat_spin.setValue(sug[0])
+        self.lon_spin.setValue(sug[1])
+        self._suppress = False
+        self._on_automation_changed()
+
+    def _on_automation_changed(self):
         if self._suppress:
             return
-        enabled = self.idle_enable_chk.isChecked()
-        sec = self.idle_spin.value() if enabled else 0
-        self.idle_spin.setEnabled(enabled)
-        # save via worker (will update config and emit)
-        self.worker.submit("set_idle_timeout", sec)
+        values = {
+            "idle_enabled": self.idle_enable_chk.isChecked(),
+            "idle_timeout_seconds": self.idle_spin.value(),
+            "day_off_enabled": self.day_chk.isChecked(),
+            "latitude": round(self.lat_spin.value(), 4),
+            "longitude": round(self.lon_spin.value(), 4),
+        }
+        self.idle_spin.setEnabled(values["idle_enabled"])
+        self.worker.submit("settings", values)   # echoes back via config_updated
+
+    def _apply_automation(self, cfg):
+        """Push config into the idle watch and the daytime check."""
+        idle_ms = (int(cfg.get("idle_timeout_seconds", 12)) * 1000
+                   if cfg.get("idle_enabled", True) else 0)
+        self.idle_spin.setEnabled(bool(cfg.get("idle_enabled", True)))
+        self.idle_mon.set_timeout(idle_ms)
+        if idle_ms == 0 and self._dimmed:
+            self._on_user_active()
+
+        auto = {k: cfg.get(k) for k in ("day_off_enabled", "latitude", "longitude")}
+        if auto != self._auto:
+            self._auto = auto
+            self._day_state = None       # settings changed -> re-evaluate now
+        self._check_day()
+
+    def _on_user_idle(self):
+        self._dimmed = True
+        self.worker.submit("idle_dim")
+        self.idle_mon.watch_active()
+
+    def _on_user_active(self):
+        if self._dimmed:
+            self._dimmed = False
+            self.worker.submit("idle_restore")
+
+    def _check_day(self):
+        cfg = self._auto
+        lat, lon = cfg.get("latitude"), cfg.get("longitude")
+        if lat is None:
+            sug = self._suggested_location()
+            if sug is None:
+                self.sun_lbl.setText("Set a location to use daytime off.")
+                return
+            lat, lon = sug[0], sug[1]
+        is_day = bool(cfg.get("day_off_enabled")) and self.mod.is_daytime(lat, lon)
+
+        times = self.mod.sun_times(lat, lon)
+        if times is True:
+            txt = "Today: the sun does not set (polar day)."
+        elif times is False:
+            txt = "Today: the sun does not rise (polar night)."
+        else:
+            txt = f"Today: sunrise {times[0]:%H:%M} · sunset {times[1]:%H:%M}"
+        if cfg.get("latitude") is None and self._suggested is not None:
+            txt += f" — suggested from timezone {self._suggested[2]}"
+        self.sun_lbl.setText(txt)
+
+        if is_day == self._day_state:
+            return                       # act on transitions only: manual "on" by day sticks
+        self._day_state = is_day
+        self.worker.submit("day_off" if is_day else "day_on")
 
     # -- autostart --
     def _load_autostart_state(self):
@@ -997,6 +1256,40 @@ class MainWindow(QMainWindow):
         )
 
     # -- firmware (FN+F4/F3) polling --
+    def _watch_hw_changed(self):
+        path = self.kbd.PATH / "brightness_hw_changed"
+        try:
+            self._hw_fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        self._rearm_hw()
+        self._hw_notifier = QSocketNotifier(self._hw_fd, QSocketNotifier.Type.Exception, self)
+        self._hw_notifier.activated.connect(self._on_hw_changed)
+
+    def _rearm_hw(self):
+        # sysfs_notify only wakes a poller that has read the attribute; the read
+        # fails with ENODATA until the first FN key press, which still arms it.
+        try:
+            os.lseek(self._hw_fd, 0, os.SEEK_SET)
+            os.read(self._hw_fd, 16)
+        except OSError:
+            pass
+
+    def _on_hw_changed(self, *_args):
+        self._rearm_hw()
+        self._poll_firmware()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.kbd.available:
+            self._poll_firmware()
+            self._fw_timer.start()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        if self._hw_notifier is not None:
+            self._fw_timer.stop()        # notifier covers FN keys while hidden
+
     def _poll_firmware(self):
         if not self.kbd.available or self._interacting:
             return
