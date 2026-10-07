@@ -1,8 +1,10 @@
 """VRGB Suite: worker."""
 
 import copy
+import errno
 import queue
 import subprocess
+import time
 import sys
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -162,8 +164,26 @@ class DeviceWorker(QThread):
             else:
                 r, g, b = mod.hex_to_rgb(hexcol)
                 intensity = mod.percent_to_intensity(percent)
-                mod.set_firmware_mode(dev, False)
-                mod.set_color(dev, r, g, b, intensity)
+
+                # Live preview can briefly outrun some ITE5570 controllers and
+                # produce EIO/EREMOTEIO. Preview frames are best-effort: retry
+                # once, then drop the intermediate frame quietly. A committed
+                # color still takes the normal error path.
+                transient = {errno.EIO}
+                if hasattr(errno, "EREMOTEIO"):
+                    transient.add(errno.EREMOTEIO)
+                for attempt in range(2):
+                    try:
+                        mod.set_firmware_mode(dev, False)
+                        mod.set_color(dev, r, g, b, intensity)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in transient:
+                            raise
+                        if attempt == 0:
+                            time.sleep(0.02)
+                        else:
+                            return
         except PermissionError:
             if persist:
                 self._run_cli(["set", hexcol, str(percent)])
@@ -207,24 +227,6 @@ class DeviceWorker(QThread):
             self._run_cli(["auto", "on" if on else "off"])
             self._emit_cfg(self._cfg())
             self.op_done.emit("auto", True, "Firmware mode " + ("on" if on else "off") + " (pkexec)")
-
-    def _op_rainbow(self, mod, on):
-        try:
-            dev = self._ensure_device()
-        except SystemExit:
-            return
-        cfg = self._cfg()
-        try:
-            mod.cmd_rainbow(cfg, dev, "on" if on else "off")
-            self._emit_cfg(cfg)
-            self.op_done.emit("rainbow", True, "Rainbow " + ("on" if on else "off"))
-        except PermissionError:
-            # The deprecated spelling: the root-owned system CLI may predate rainbow-oem.
-            self._run_cli(["rainbow", "on" if on else "off"])
-            self._emit_cfg(self._cfg())
-            self.op_done.emit("rainbow", True, "Rainbow " + ("on" if on else "off") + " (pkexec)")
-        except SystemExit:
-            self.op_done.emit("rainbow", False, "OEM rainbow not supported on this device")
 
     def _op_cycle(self, mod, on):
         try:

@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         self._expected_fw = self.kbd.level() if self.kbd.available else None
         self._fw_ignore_until = 0.0      # monotonic deadline to ignore self-induced fw changes
 
-        self.setWindowTitle("VRGB — Keyboard RGB")
+        self.setWindowTitle("Keyboard RGB")
         self.setWindowIcon(make_logo_icon())
 
         cfg = mod.load_config()
@@ -236,9 +236,6 @@ class MainWindow(QMainWindow):
         self.auto_chk.setToolTip("Hand control back to the keyboard firmware")
         bl.addWidget(self.auto_chk, 1, 1, 1, 2)
 
-        self.rainbow_chk = QCheckBox("OEM rainbow")
-        bl.addWidget(self.rainbow_chk, 1, 3)
-
         self.cycle_chk = QCheckBox("Rainbow")
         self.cycle_chk.setToolTip(
             "Cycle through the color spectrum (vrgb rainbow). Keeps running after the "
@@ -344,7 +341,6 @@ class MainWindow(QMainWindow):
         self.bright_slider.sliderReleased.connect(self._commit_color)
         self.power_btn.clicked.connect(self._on_power)
         self.auto_chk.toggled.connect(self._on_auto)
-        self.rainbow_chk.toggled.connect(self._on_rainbow)
         self.cycle_chk.toggled.connect(self._on_cycle)
         self.btn_save.clicked.connect(self._profile_save)
         self.btn_load.clicked.connect(self._profile_load)
@@ -509,11 +505,6 @@ class MainWindow(QMainWindow):
         if self._suppress:
             return
         self.worker.submit("auto", bool(checked))
-
-    def _on_rainbow(self, checked):
-        if self._suppress:
-            return
-        self.worker.submit("rainbow", bool(checked))
 
     def _on_cycle(self, checked):
         if self._suppress:
@@ -728,19 +719,11 @@ class MainWindow(QMainWindow):
         for w in self._dev_widgets:
             w.setEnabled(present)
         if present:
-            rainbow_ok = bool(devinfo.get("rainbow_supported", False))
-            self.rainbow_chk.setEnabled(rainbow_ok)
-            if not rainbow_ok:
-                self.rainbow_chk.setToolTip(
-                    "OEM rainbow is not supported on this device mapping "
-                    f"({devinfo.get('hid_id', '')})"
-                )
             self.status_lbl.setStyleSheet("color:#5c5;")
             self.status_lbl.setText(
                 f"● {devinfo.get('model', 'keyboard')}  ·  {devinfo.get('path', '')}"
             )
         else:
-            self.rainbow_chk.setEnabled(False)
             self.status_lbl.setStyleSheet("color:#d55;")
             self.status_lbl.setText("✗ " + (err or "Keyboard not found"))
 

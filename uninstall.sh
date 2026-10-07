@@ -2,6 +2,14 @@
 
 set -e
 
+# Keep user-session cleanup in the invoking user's context.
+if [[ $EUID -eq 0 ]]; then
+    echo "Error: do not run this uninstaller with sudo/root."
+    echo "Run: ./uninstall.sh"
+    echo "The uninstaller will request sudo when it needs it."
+    exit 1
+fi
+
 echo "VRGB Uninstaller (v0.3.5)"
 echo "----------------"
 
@@ -38,11 +46,11 @@ echo "[3/5] Reloading udev rules..."
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
-echo "[4/5] Removing KDE autostart (if present)..."
+echo "[4/5] Removing XDG autostart (if present)..."
 
 if [ -f ~/.config/autostart/vrgb.desktop ]; then
     rm ~/.config/autostart/vrgb.desktop
-    echo "Removed KDE autostart entry."
+    echo "Removed XDG autostart entry."
 else
     echo "Autostart entry not found. Skipping."
 fi

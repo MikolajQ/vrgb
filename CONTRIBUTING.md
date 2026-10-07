@@ -28,20 +28,20 @@ CI runs the tests on Python 3.8 to 3.13, checks that Core and Suite versions mat
 
 ## Commit messages and releases
 
-Releases are fully automated with semantic-release. Every push to `main` is analyzed, and commit messages following [Conventional Commits](https://www.conventionalcommits.org/) decide the next version:
+CI runs automatically on pushes and pull requests to validate tests, Python compilation,
+version consistency, and the install scripts. CI does **not** create tags or GitHub releases.
 
-| Commit | Release |
-| --- | --- |
-| `fix: ...` | patch (0.3.5 → 0.3.6) |
-| `feat: ...` | minor (0.3.5 → 0.4.0) |
-| `feat!: ...` | major (0.3.5 → 1.0.0) |
-| `docs:`, `test:`, `ci:`, `chore:`, `refactor:` … | no release |
+Releases are intentionally manual and happen only after the merged tree has been tested on
+real supported hardware. The maintainer creates the release/tag from GitHub after that
+validation. `scripts/build-release.sh` is retained as a local/manual helper for building
+release assets; it is not invoked automatically by CI.
 
-Commits that do not follow the format do not fail CI; they are simply ignored when computing the version. The release job stamps the version into `vrgb.py` and `vrgb_suite/__init__.py`, builds the packages with `scripts/build-release.sh`, and attaches them to the GitHub release, so do not bump versions by hand.
+Conventional Commit messages are welcome because they keep history readable, but they do
+not trigger a release.
 
 ## Adding a new device
 
-VRGB already drives any HID LampArray keyboard it finds, reading the report IDs from the device's report descriptor; `vrgb status` shows such a device as unverified. A verified mapping adds what the descriptor cannot tell: the confirmed models, required kernel modules, and OEM rainbow support. It needs a report from someone who has tested it on a real laptop.
+VRGB already drives any HID LampArray keyboard it finds, reading the report IDs from the device's report descriptor; `vrgb status` shows such a device as unverified. A verified mapping adds what the descriptor cannot tell: the confirmed models and required kernel modules. It needs a report from someone who has tested it on a real laptop.
 
 1. Collect the device identifiers:
 
@@ -56,4 +56,4 @@ VRGB already drives any HID LampArray keyboard it finds, reading the report IDs 
 
 ## Reporting hardware results
 
-Open an issue with your laptop model, the `HID_ID` and `HID_NAME` lines above, the output of `vrgb --debug status`, and which commands worked (static color, brightness, `auto`, `rainbow`, `rainbow-oem`).
+Open an issue with your laptop model, the `HID_ID` and `HID_NAME` lines above, the output of `vrgb --debug status`, and which commands worked (static color, brightness, `auto`, `rainbow`, and `cycle`).

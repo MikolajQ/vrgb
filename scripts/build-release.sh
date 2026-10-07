@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stamps VERSION into Core and Suite and builds every release artifact into dist/.
-# Run by semantic-release (prepare step) with the computed version; also works locally.
+# Manual release helper: run only after physical hardware validation.
 set -euo pipefail
 
 version="${1:?usage: $0 VERSION}"

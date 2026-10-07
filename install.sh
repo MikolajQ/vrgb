@@ -2,6 +2,15 @@
 
 set -e
 
+# This script invokes sudo only for system-wide files. Running the whole
+# installer as root breaks per-user autostart paths and systemd --user state.
+if [[ $EUID -eq 0 ]]; then
+    echo "Error: do not run this installer with sudo/root."
+    echo "Run: ./install.sh"
+    echo "The installer will request sudo when it needs it."
+    exit 1
+fi
+
 # Run installer from its own directory (prevents path issues)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -110,13 +119,14 @@ EOF
         fi
     fi
 else
-read -p "Install autostart restore? (y/n): " AUTOSTART
+read -p "Restore saved lighting automatically at login? (y/n): " AUTOSTART
 
 if [[ "$AUTOSTART" == "y" || "$AUTOSTART" == "Y" ]]; then
-
-mkdir -p ~/.config/autostart
-
-cat <<EOF > ~/.config/autostart/vrgb.desktop
+    # XDG autostart is init-system agnostic. Minimal WMs/compositors can
+    # instead launch `vrgb restore` from their native startup config.
+    mkdir -p ~/.config/autostart
+    rm -f ~/.config/systemd/user/vrgb-restore.service
+    cat <<EOF > ~/.config/autostart/vrgb.desktop
 [Desktop Entry]
 Type=Application
 Exec=/usr/local/bin/vrgb restore
@@ -126,26 +136,7 @@ X-GNOME-Autostart-enabled=true
 Name=VRGB Restore
 Comment=Restore keyboard RGB state
 EOF
-
-echo "Autostart installed."
-
-fi
-
-echo
-read -p "Install systemd user autostart restore (works on any desktop environment)? (y/n): " SYSTEMD_AUTOSTART
-
-if [[ "$SYSTEMD_AUTOSTART" == "y" || "$SYSTEMD_AUTOSTART" == "Y" ]]; then
-
-mkdir -p ~/.config/systemd/user
-
-install -m 644 "$SCRIPT_DIR/systemd/vrgb-restore.service" ~/.config/systemd/user/vrgb-restore.service
-
-systemctl --user daemon-reload
-systemctl --user enable vrgb-restore.service
-
-echo "systemd autostart installed and enabled."
-echo "It will start restoring your saved state from your next login onward."
-
+    echo "XDG autostart installed."
 fi
 fi
 
