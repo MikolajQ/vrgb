@@ -1,7 +1,7 @@
 <p align="center">
   <img src="assets/vrgblogodark.png" width="500" alt="VRGB">
   <br><br>
-  <strong>Native RGB control for ASUS Vivobook keyboards on Linux.</strong>
+  <strong>Native RGB control for ASUS Vivobook keyboards on Linux</strong>
   <br>
   Lightweight HID LampArray control with a CLI, optional desktop Suite, profiles, automation, and effects.
   <br><br>
@@ -42,7 +42,19 @@ models.
 ## Screenshots
 
 <p align="center">
-  <img src="assets/vrgb-demo.png" width="900" alt="VRGB Suite">
+  <img src="assets/vrgb-demo.png" width="1000" alt="VRGB Desktop: Suite and Core">
+</p>
+
+### VRGB Suite
+
+<p align="center">
+  <img src="assets/vrgb-suite.png" width="479" alt="VRGB Suite">
+</p>
+
+### VRGB Core
+
+<p align="center">
+  <img src="assets/vrgb-core.png" width="906" alt="VRGB Core CLI">
 </p>
 
 ## Features
