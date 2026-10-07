@@ -6,6 +6,7 @@
   Lightweight HID LampArray control with a CLI, optional desktop Suite, profiles, automation, and effects.
   <br><br>
   <a href="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml"><img src="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://discord.gg/VHtsKyX7VV"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white&style=flat" alt="Discord"></a>
 </p>
 
 ## Overview
