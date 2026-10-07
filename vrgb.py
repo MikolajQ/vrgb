@@ -7,6 +7,7 @@ import fcntl
 import pwd
 import time
 import colorsys
+import subprocess
 from pathlib import Path
 
 # ===== Debug =====
@@ -24,8 +25,15 @@ def debug(msg):
 HIDIOCSFEATURE_BASE = 0xC0004806
 
 
+HIDIOCGFEATURE_BASE = 0xC0004807
+
+
 def HIDIOCSFEATURE(length: int) -> int:
     return HIDIOCSFEATURE_BASE | (length << 16)
+
+
+def HIDIOCGFEATURE(length: int) -> int:
+    return HIDIOCGFEATURE_BASE | (length << 16)
 
 
 def get_real_home() -> Path:
@@ -52,6 +60,9 @@ def get_real_home() -> Path:
 CONFIG_DIR = get_real_home() / ".config" / "vrgb"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+# Verified devices. Report IDs are read from each device's HID report descriptor;
+# the IDs here are the fallback when the descriptor cannot be read, and the
+# remaining fields carry what a descriptor cannot tell (models, modules, rainbow).
 SUPPORTED_DEVICES = {
     "0018:00000B05:000019B6": {
         "hid_name": "ITE5570:00 0B05:19B6",
@@ -77,6 +88,12 @@ SUPPORTED_DEVICES = {
         "rainbow_supported": False,
     },
 }
+
+# HID LampArray usage page (0x59) and the report usages VRGB talks to.
+LAMPARRAY_USAGE_PAGE = 0x59
+LAMPARRAY_ATTRIBUTES_REPORT = 0x02
+LAMPARRAY_RANGE_UPDATE_REPORT = 0x60
+LAMPARRAY_CONTROL_REPORT = 0x70
 
 HOST_BYTE = 0x00
 FIRMWARE_BYTE = 0x01
@@ -247,6 +264,9 @@ def save_config(cfg):
 #   last_on_percent  -> last known non-zero brightness for restore behavior
 #   autonomous       -> whether firmware/autonomous mode should be preserved
 #   profiles         -> named snapshots of color / percent / autonomous
+#   cycle            -> {period, fps, pid} while the software rainbow is the saved
+#                       mode; `restore` resumes it. Commands that set another
+#                       mode remove it; `off` and `brightness` keep it.
 
 def get_saved_static_state(cfg):
     r, g, b = hex_to_rgb(cfg["color"])
@@ -332,6 +352,7 @@ def find_device():
         score = -1
         reason = "no match"
         profile = None
+        report_ids = read_lamparray_report_ids(dev)
 
         if hid_id in SUPPORTED_DEVICES:
             profile = SUPPORTED_DEVICES[hid_id]
@@ -344,6 +365,15 @@ def find_device():
                     score = 90
                     reason = f"exact HID_NAME match ({supported_hid_id})"
                     break
+
+        if profile is None and {
+            LAMPARRAY_RANGE_UPDATE_REPORT,
+            LAMPARRAY_CONTROL_REPORT,
+            LAMPARRAY_ATTRIBUTES_REPORT,
+        } <= report_ids.keys():
+            profile = {"model": f"Unverified HID LampArray device ({hid_name})"}
+            score = 50
+            reason = "HID LampArray report descriptor"
 
         debug(
             f"{dev.name}: hid_id={hid_id} hid_name={hid_name} "
@@ -359,8 +389,14 @@ def find_device():
                 "hid_name": hid_name,
                 "model": profile["model"],
                 "confirmed_models": profile.get("confirmed_models", []),
-                "firmware_report_id": profile["firmware_report_id"],
-                "color_report_id": profile["color_report_id"],
+                "firmware_report_id": report_ids.get(
+                    LAMPARRAY_CONTROL_REPORT, profile.get("firmware_report_id")
+                ),
+                "color_report_id": report_ids.get(
+                    LAMPARRAY_RANGE_UPDATE_REPORT, profile.get("color_report_id")
+                ),
+                "attributes_report_id": report_ids.get(LAMPARRAY_ATTRIBUTES_REPORT),
+                "verified": score >= 90,
                 "rainbow_supported": profile.get("rainbow_supported", False),
                 "required_modules": profile.get("required_modules", []),
             }
@@ -376,9 +412,88 @@ def find_device():
         if best_match.get("required_modules"):
             debug("Required modules: " + ", ".join(best_match["required_modules"]))
         ensure_required_modules(best_match)
+        if not best_match["verified"]:
+            # Verified devices keep their tested lamp range; others light every lamp.
+            best_match["lamp_id_end"] = max(get_lamp_count(best_match) - 1, 0)
         return best_match
 
     die("VRGB HID device not found")
+
+
+def parse_lamparray_report_ids(descriptor):
+    """Map LampArray report usages to report IDs in a HID report descriptor.
+
+    A report's ID is the Report ID in effect at the first main item inside its
+    collection, which holds whether the descriptor declares it before or after
+    the collection's Usage.
+    """
+    ids = {}
+    usage_page = report_id = 0
+    usages = []       # local Usage items since the last main item
+    collections = []  # (page, usage) of each open collection
+    pos = 0
+
+    while pos < len(descriptor):
+        prefix = descriptor[pos]
+        if prefix == 0xFE:  # long item: data size in the next byte
+            pos += 3 + (descriptor[pos + 1] if pos + 1 < len(descriptor) else 0)
+            continue
+        size = (0, 1, 2, 4)[prefix & 0x03]
+        value = int.from_bytes(descriptor[pos + 1 : pos + 1 + size], "little")
+        tag = prefix & 0xFC
+        pos += 1 + size
+
+        if tag == 0x04:    # Usage Page
+            usage_page = value
+        elif tag == 0x84:  # Report ID
+            report_id = value
+        elif tag == 0x08:  # Usage (a 4-byte usage carries its own page)
+            usages.append((value >> 16, value & 0xFFFF) if size == 4 else (usage_page, value))
+        elif tag == 0xA0:  # Collection
+            collections.append(usages[-1] if usages else None)
+            usages = []
+        elif tag == 0xC0:  # End Collection
+            if collections:
+                collections.pop()
+        elif tag in (0x80, 0x90, 0xB0):  # Input / Output / Feature
+            for entry in collections:
+                if entry and entry[0] == LAMPARRAY_USAGE_PAGE and report_id:
+                    ids.setdefault(entry[1], report_id)
+            usages = []
+
+    return ids
+
+
+def read_lamparray_report_ids(hidraw_dir):
+    try:
+        descriptor = (hidraw_dir / "device" / "report_descriptor").read_bytes()
+    except OSError as e:
+        debug(f"{hidraw_dir.name}: cannot read report descriptor: {e}")
+        return {}
+    return parse_lamparray_report_ids(descriptor)
+
+
+def hid_get_feature(dev_path, report_id, length):
+    buf = bytearray(length + 1)
+    buf[0] = report_id
+    fd = os.open(dev_path, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        fcntl.ioctl(fd, HIDIOCGFEATURE(len(buf)), buf)
+    finally:
+        os.close(fd)
+    debug(f"hid_get_feature dev={dev_path} report=0x{report_id:02X} data={buf[1:].hex()}")
+    return bytes(buf[1:])
+
+
+def get_lamp_count(devinfo):
+    # LampArrayAttributesReport starts with LampCount (uint16, little-endian).
+    try:
+        data = hid_get_feature(devinfo["path"], devinfo["attributes_report_id"], 22)
+    except PermissionError:
+        die(f"Permission denied opening {devinfo['path']} (are you in the vrgb group?)")
+    except OSError as e:
+        die(f"Could not read LampArray attributes from {devinfo['path']}: {e}")
+    return int.from_bytes(data[:2], "little")
 
 
 def hid_set_feature(dev_path, report_id, payload_bytes):
@@ -406,13 +521,15 @@ def set_firmware_mode(devinfo, enabled: bool):
 def set_color(devinfo, r, g, b, intensity):
     debug(f"set_color r={r} g={g} b={b} intensity={intensity}")
 
+    # LampRangeUpdateReport: flags (update complete), LampIdStart, LampIdEnd, RGBI.
+    lamp_id_end = devinfo.get("lamp_id_end", 0)
     payload = bytes(
         [
             0x01,
             0x00,
             0x00,
-            0x00,
-            0x00,
+            lamp_id_end & 0xFF,
+            lamp_id_end >> 8,
             clamp(r, 0, 255),
             clamp(g, 0, 255),
             clamp(b, 0, 255),
@@ -485,6 +602,7 @@ def apply_profile(cfg, devinfo, profile, save=True):
 
     debug(f"apply_profile color={color} percent={percent} autonomous={autonomous}")
 
+    cfg.pop("cycle", None)
     cfg["color"] = color
     cfg["percent"] = percent
     if percent > 0:
@@ -583,6 +701,8 @@ def cmd_status(cfg, devinfo):
     print("Device:", devinfo["path"])
     print("Model:", devinfo["model"])
     print("HID ID:", devinfo["hid_id"])
+    if not devinfo.get("verified", True):
+        print("Verified: no (detected from its HID LampArray descriptor; please report results)")
 
     confirmed_models = devinfo.get("confirmed_models", [])
     if confirmed_models:
@@ -600,7 +720,11 @@ def cmd_status(cfg, devinfo):
     print("Saved color:", "#" + cfg["color"])
     print("Saved brightness:", cfg["percent"], "%")
     print("Last-on brightness:", cfg["last_on_percent"], "%")
-    print("Saved mode:", "firmware/autonomous" if cfg["autonomous"] else "host/static")
+    cycle = cfg.get("cycle")
+    if isinstance(cycle, dict):
+        print(f"Saved mode: rainbow cycle (period={cycle.get('period')}s, {cycle.get('fps')} fps)")
+    else:
+        print("Saved mode:", "firmware/autonomous" if cfg["autonomous"] else "host/static")
     debug("status complete")
 
 
@@ -617,6 +741,7 @@ def cmd_set(cfg, devinfo, color, percent=None):
     set_firmware_mode(devinfo, False)
     set_color(devinfo, r, g, b, intensity)
 
+    cfg.pop("cycle", None)
     cfg["color"] = color.replace("#", "").lower()
     cfg["percent"] = percent
     if percent > 0:
@@ -632,6 +757,14 @@ def cmd_brightness(cfg, devinfo, percent):
     intensity = percent_to_intensity(percent)
     debug(f"cmd_brightness percent={percent} intensity={intensity}")
 
+    if cfg.get("cycle"):
+        # A running cycle picks the new brightness up from the config.
+        cfg["percent"] = percent
+        if percent > 0:
+            cfg["last_on_percent"] = percent
+        save_config(cfg)
+        return
+
     set_firmware_mode(devinfo, False)
     set_color(devinfo, r, g, b, intensity)
 
@@ -645,6 +778,7 @@ def cmd_brightness(cfg, devinfo, percent):
 def cmd_auto(cfg, devinfo, state):
     firmware_on = state == "on"
     debug(f"cmd_auto state={state}")
+    cfg.pop("cycle", None)
 
     if firmware_on:
         set_firmware_mode(devinfo, True)
@@ -663,6 +797,7 @@ def cmd_auto(cfg, devinfo, state):
 def cmd_rainbow(cfg, devinfo, state):
     enable = state == "on"
     debug(f"cmd_rainbow state={state}")
+    cfg.pop("cycle", None)
 
     if not devinfo.get("rainbow_supported", False):
         if enable:
@@ -684,6 +819,12 @@ def cmd_rainbow(cfg, devinfo, state):
         print("OEM rainbow is not supported for this device mapping; restored saved static state.")
         return
 
+    # debugfs is root-only (0700). Checked before touching the keyboard, and
+    # because Path.exists() reports a permission error as a missing path on
+    # newer Pythons.
+    if os.geteuid() != 0:
+        die("OEM rainbow requires root: run `sudo vrgb rainbow-oem on|off`.")
+
     if enable:
         set_firmware_mode(devinfo, True)
         asus_wmi_rainbow(True)
@@ -700,16 +841,68 @@ def cmd_rainbow(cfg, devinfo, state):
         save_config(cfg)
 
 
+def owns_cycle(cfg):
+    cycle = cfg.get("cycle")
+    return isinstance(cycle, dict) and cycle.get("pid") == os.getpid() and cfg["percent"] > 0
+
+
+def config_stamp():
+    # Every save replaces the file, so a new inode marks a write even within one mtime tick.
+    try:
+        st = CONFIG_FILE.stat()
+        return st.st_ino, st.st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def hand_over(cfg, devinfo):
+    """Re-apply the state another command saved: this process's last frame may
+    have reached the keyboard after that command's own write."""
+    cycle = cfg.get("cycle")
+    if isinstance(cycle, dict) and cfg["percent"] > 0:
+        return  # a newer cycle drives the keyboard now
+    if cfg["autonomous"]:
+        set_firmware_mode(devinfo, True)
+    else:
+        r, g, b = hex_to_rgb(cfg["color"])
+        set_firmware_mode(devinfo, False)
+        set_color(devinfo, r, g, b, percent_to_intensity(cfg["percent"]))
+
+
+RESTORE_SERVICE = "vrgb-restore.service"
+# `vrgb rainbow` with no argument: the software cycle at these settings.
+RAINBOW_PERCENT = 100
+RAINBOW_PERIOD = 4
+
+
 def cmd_cycle(cfg, devinfo, percent=None, period=None, fps=None):
+    save_cycle(cfg, percent, period, fps)
+    run_cycle(cfg, devinfo)
+
+
+def start_cycle_service():
+    """Hand the saved cycle to the user's restore service, so it keeps running
+    without a terminal. Returns False when that service is not enabled."""
+    try:
+        enabled = subprocess.run(
+            ["systemctl", "--user", "--quiet", "is-enabled", RESTORE_SERVICE]
+        ).returncode == 0
+        if not enabled:
+            return False
+        return subprocess.run(["systemctl", "--user", "restart", RESTORE_SERVICE]).returncode == 0
+    except OSError:  # no systemctl
+        return False
+
+
+def save_cycle(cfg, percent=None, period=None, fps=None):
     if percent is None:
-        percent = cfg["percent"]
+        percent = cfg["percent"] or cfg["last_on_percent"]
     if period is None:
         period = 6.0
     if fps is None:
         fps = 20.0
 
     percent = clamp(int(percent), 0, 100)
-    intensity = percent_to_intensity(percent)
 
     try:
         period = float(period)
@@ -717,12 +910,27 @@ def cmd_cycle(cfg, devinfo, percent=None, period=None, fps=None):
     except (TypeError, ValueError):
         die("period and fps must be numbers")
 
+    if percent <= 0:
+        die("percent must be greater than 0")
     if period <= 0:
         die("period must be greater than 0")
     if fps <= 0:
         die("fps must be greater than 0")
 
     debug(f"cmd_cycle percent={percent} period={period} fps={fps}")
+
+    # Saving the cycle makes it the restored mode, and tells an older cycle
+    # process (whose pid no longer matches) to stop.
+    cfg["cycle"] = {"period": period, "fps": fps, "pid": os.getpid()}
+    cfg["percent"] = percent
+    cfg["last_on_percent"] = percent
+    cfg["autonomous"] = False
+    save_config(cfg)
+
+
+def run_cycle(cfg, devinfo):
+    period, fps = cfg["cycle"]["period"], cfg["cycle"]["fps"]
+    stamp = config_stamp()
 
     print(f"Cycling through the color spectrum (period={period}s, {fps} fps). Press Ctrl+C to stop.")
 
@@ -732,10 +940,17 @@ def cmd_cycle(cfg, devinfo, percent=None, period=None, fps=None):
     try:
         set_firmware_mode(devinfo, False)
         while True:
+            if config_stamp() != stamp:
+                stamp = config_stamp()
+                cfg = load_config()
+                if not owns_cycle(cfg):
+                    debug("cmd_cycle config changed by another command; stopping")
+                    hand_over(cfg, devinfo)
+                    return
             try:
                 hue = ((time.monotonic() - start) / period) % 1.0
                 r, g, b = (round(c * 255) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0))
-                set_color(devinfo, r, g, b, intensity)
+                set_color(devinfo, r, g, b, percent_to_intensity(cfg["percent"]))
             except OSError as e:
                 # The hidraw node can briefly disappear or re-enumerate
                 # around suspend/resume; reacquire it and keep cycling.
@@ -746,6 +961,11 @@ def cmd_cycle(cfg, devinfo, percent=None, period=None, fps=None):
                 continue
             time.sleep(frame_delay)
     except KeyboardInterrupt:
+        # Ctrl+C is a deliberate stop, so the cycle is not resumed at the next login.
+        cfg = load_config()
+        if owns_cycle(cfg):
+            cfg.pop("cycle")
+            save_config(cfg)
         print("\nStopped cycling.")
 
 
@@ -801,7 +1021,8 @@ def main():
   vrgb set RRGGBB [percent]
   vrgb brightness 0-100
   vrgb auto on|off
-  vrgb rainbow on|off
+  vrgb rainbow             (software rainbow: cycle 100 4)
+  vrgb rainbow-oem on|off  (OEM firmware rainbow, sudo)
   vrgb cycle [percent] [period_seconds] [fps]
   vrgb off
   vrgb restore
@@ -827,6 +1048,7 @@ Example: vrgb --debug status
         "brightness",
         "auto",
         "rainbow",
+        "rainbow-oem",
         "cycle",
         "off",
         "restore",
@@ -860,18 +1082,31 @@ Example: vrgb --debug status
         devinfo = find_device()
         cmd_auto(cfg, devinfo, args[1])
 
-    elif cmd == "rainbow":
+    elif cmd == "cycle" or args == ["rainbow"]:
+        devinfo = find_device()
+        if cmd == "rainbow":
+            percent, period, fps = RAINBOW_PERCENT, RAINBOW_PERIOD, None
+        else:
+            percent = args[1] if len(args) > 1 else None
+            period = args[2] if len(args) > 2 else None
+            fps = args[3] if len(args) > 3 else None
+        save_cycle(cfg, percent, period, fps)
+        if start_cycle_service():
+            print(f"Rainbow cycle running in the background ({RESTORE_SERVICE}).")
+        else:
+            run_cycle(cfg, devinfo)
+
+    elif cmd in ("rainbow", "rainbow-oem"):
         if len(args) < 2 or args[1] not in ["on", "off"]:
-            die("rainbow requires 'on' or 'off'")
+            die("rainbow-oem requires 'on' or 'off'")
+        if cmd == "rainbow":
+            # Deprecated alias, kept so scripts and older frontends keep working.
+            print(
+                "Warning: `vrgb rainbow on|off` is deprecated; use `vrgb rainbow-oem on|off`.",
+                file=sys.stderr,
+            )
         devinfo = find_device()
         cmd_rainbow(cfg, devinfo, args[1])
-
-    elif cmd == "cycle":
-        devinfo = find_device()
-        percent = args[1] if len(args) > 1 else None
-        period = args[2] if len(args) > 2 else None
-        fps = args[3] if len(args) > 3 else None
-        cmd_cycle(cfg, devinfo, percent, period, fps)
 
     elif cmd == "off":
         devinfo = find_device()
@@ -879,7 +1114,12 @@ Example: vrgb --debug status
 
     elif cmd == "restore":
         devinfo = find_device()
-        cmd_restore(cfg, devinfo)
+        cycle = cfg.get("cycle")
+        if isinstance(cycle, dict):
+            p = get_saved_static_state(cfg)[3]
+            cmd_cycle(cfg, devinfo, p, cycle.get("period"), cycle.get("fps"))
+        else:
+            cmd_restore(cfg, devinfo)
 
     elif cmd == "profile":
         if len(args) < 2:

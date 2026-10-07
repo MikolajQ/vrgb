@@ -3,8 +3,12 @@ Description=Restore VRGB keyboard lighting state
 After=graphical-session.target
 
 [Service]
-Type=oneshot
+# exec, not oneshot: when the saved mode is the rainbow cycle, `vrgb restore`
+# keeps running to drive it. A static restore exits right away.
+Type=exec
 ExecStart=/usr/local/bin/vrgb restore
+Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=graphical-session.target

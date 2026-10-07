@@ -42,12 +42,20 @@ Automation (runs inside this process, so the tray must be running):
   * Idle dimming — GNOME Mutter IdleMonitor, Wayland ext-idle-notify-v1 (KDE,
     wlroots compositors…) or X11 XScreenSaver, see idle.make_idle_backend().
     Dimming/restoring only touches the HID intensity and never the saved config, so
-    the sliders keep showing the user's real brightness.
+    the sliders keep showing the user's real brightness. Paused while the rainbow
+    is the saved mode, whose process would overwrite a dimmed frame.
   * Daytime off — while the sun is up at the configured location (computed locally,
     see sun.sun_times) the backlight is switched off; it comes back at sunset if it
     was on before. The location is suggested from the system timezone.
 
-  * Session start (`vrgb-gui --tray`) — restores the lighting, or keeps it off by day.
+  * Session start (`vrgb-gui --tray`) — restores the lighting (resuming a saved
+    rainbow), or keeps it off by day.
+
+Rainbow: the Suite does not run the cycle loop itself. It starts Core's
+`vrgb cycle` as a separate process (worker._start_cycle), which hands the cycle to
+vrgb-restore.service when enabled or keeps running on its own, so the rainbow
+outlives the GUI. Brightness changes go through cmd_brightness, which the running
+cycle picks up from the config; a new color goes through cmd_set, which stops it.
 
 State lives in ~/.config/vrgb/config.json: Core's keys (color / intensity / profiles /
 autonomous) plus the Suite's own (see sun.DEFAULTS); Core preserves unknown keys.

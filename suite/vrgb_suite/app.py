@@ -2,6 +2,8 @@
 
 import math
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -237,6 +239,12 @@ class MainWindow(QMainWindow):
         self.rainbow_chk = QCheckBox("OEM rainbow")
         bl.addWidget(self.rainbow_chk, 1, 3)
 
+        self.cycle_chk = QCheckBox("Rainbow")
+        self.cycle_chk.setToolTip(
+            "Cycle through the color spectrum (vrgb rainbow). Keeps running after the "
+            "window closes and comes back after logout/reboot; idle dimming is paused.")
+        bl.addWidget(self.cycle_chk, 2, 1, 1, 2)
+
         root.addWidget(bbox)
 
         pbox = QGroupBox("Profiles")
@@ -323,7 +331,7 @@ class MainWindow(QMainWindow):
 
         self._dev_widgets = [
             self.wheel, self.value_slider, self.hex_edit,
-            self.bright_slider, self.power_btn, self.auto_chk,
+            self.bright_slider, self.power_btn, self.auto_chk, self.cycle_chk,
         ] + self._preset_btns
 
         # Signal wiring
@@ -337,6 +345,7 @@ class MainWindow(QMainWindow):
         self.power_btn.clicked.connect(self._on_power)
         self.auto_chk.toggled.connect(self._on_auto)
         self.rainbow_chk.toggled.connect(self._on_rainbow)
+        self.cycle_chk.toggled.connect(self._on_cycle)
         self.btn_save.clicked.connect(self._profile_save)
         self.btn_load.clicked.connect(self._profile_load)
         self.btn_delete.clicked.connect(self._profile_delete)
@@ -379,6 +388,7 @@ class MainWindow(QMainWindow):
         self.power_btn.setChecked(self._brightness_b > 0)
         self.power_btn.setText("On" if self._brightness_b > 0 else "Off")
         self.auto_chk.setChecked(bool(cfg.get("autonomous", False)))
+        self.cycle_chk.setChecked(isinstance(cfg.get("cycle"), dict))
         self._reload_profiles(cfg)
         st = sun.settings(cfg)
         self.idle_enable_chk.setChecked(st["idle_enabled"])
@@ -504,6 +514,11 @@ class MainWindow(QMainWindow):
         if self._suppress:
             return
         self.worker.submit("rainbow", bool(checked))
+
+    def _on_cycle(self, checked):
+        if self._suppress:
+            return
+        self.worker.submit("cycle", bool(checked))
 
     def _config_mtime(self):
         try:
@@ -761,6 +776,10 @@ class Tray(QSystemTrayIcon):
         self.act_off.triggered.connect(lambda: self.worker.submit("power", False))
         menu.addAction(self.act_on)
         menu.addAction(self.act_off)
+        self.act_rainbow = QAction("Rainbow", self)
+        self.act_rainbow.setCheckable(True)
+        self.act_rainbow.triggered.connect(lambda on: self.worker.submit("cycle", on))
+        menu.addAction(self.act_rainbow)
 
         # Brightness as a submenu of discrete steps. KDE's tray menu is rendered over
         # DBusMenu, which cannot host an embedded QSlider widget — only plain items.
@@ -807,6 +826,7 @@ class Tray(QSystemTrayIcon):
         nearest = min(self._bright_actions, key=lambda pa: abs(pa[0] - b))[1]
         for _pct, a in self._bright_actions:
             a.setChecked(a is nearest)
+        self.act_rainbow.setChecked(self.window.cycle_chk.isChecked())
 
     def _pick_color(self):
         col = QColorDialog.getColor(self.window._color, self.window, "Pick keyboard color")
@@ -893,7 +913,27 @@ def claim_single_instance(background):
     return inst
 
 
+def detach_from_terminal():
+    """Started from a terminal: relaunch in the background and give the shell back.
+
+    Desktop launchers and systemd start the GUI without a terminal and are left
+    alone (a detached child would make the systemd unit exit). `--foreground`
+    keeps it attached, for debugging.
+    """
+    if "--foreground" in sys.argv or "--quit" in sys.argv or not sys.stdin.isatty():
+        return False
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    subprocess.Popen(
+        [sys.executable, "-m", "vrgb_suite", "--foreground", *sys.argv[1:]],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, env=env,
+    )
+    return True
+
+
 def main():
+    if detach_from_terminal():
+        return 0
     app = QApplication(sys.argv)
     app.setApplicationName("vrgb-gui")
     app.setApplicationDisplayName("VRGB")
@@ -946,6 +986,15 @@ def main():
 
     if not background:
         window.show()
+
+    # Ctrl+C / SIGTERM quit cleanly. Python only runs signal handlers between
+    # bytecodes, which never happens while Qt's event loop blocks in C++, so a
+    # short timer hands control back to the interpreter.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: app.quit())
+    wake = QTimer()
+    wake.timeout.connect(lambda: None)
+    wake.start(250)
 
     rc = app.exec()
     worker.stop()

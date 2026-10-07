@@ -28,3 +28,7 @@ py-modules = ["vrgb"]
 
 [tool.setuptools.dynamic]
 version = {attr = "vrgb.VERSION"}
+
+[tool.pytest.ini_options]
+pythonpath = [".", "suite"]
+testpaths = ["tests"]

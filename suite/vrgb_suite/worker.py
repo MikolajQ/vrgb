@@ -3,6 +3,7 @@
 import copy
 import queue
 import subprocess
+import sys
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -97,6 +98,25 @@ class DeviceWorker(QThread):
         if rc != 0:
             raise RuntimeError((err or out or "pkexec failed").strip())
 
+    def _start_cycle(self, mod, cfg):
+        """Start the saved (or default) rainbow through Core's own `cycle` command in
+        a separate process: Core hands it to vrgb-restore.service when that is
+        enabled, otherwise the process keeps running the cycle on its own, so the
+        rainbow outlives the GUI either way. Returns an error message or None."""
+        cycle = cfg.get("cycle") if isinstance(cfg.get("cycle"), dict) else {}
+        percent = mod.get_saved_static_state(cfg)[3]
+        proc = subprocess.Popen(
+            [sys.executable, mod.__file__, "cycle", str(percent),
+             str(cycle.get("period", mod.RAINBOW_PERIOD)), str(cycle.get("fps", 20))],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            _out, err = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            return None   # still running: this process is driving the cycle
+        return None if proc.returncode == 0 else (err.strip() or "vrgb cycle failed")
+
     # -- per-op handlers --
     def _dispatch(self, op, args):
         handler = getattr(self, f"_op_{op}", None)
@@ -120,6 +140,19 @@ class DeviceWorker(QThread):
             dev = self._ensure_device()
         except SystemExit:
             return
+        cfg = self._cfg()
+        if isinstance(cfg.get("cycle"), dict):
+            if hexcol == cfg["color"]:
+                # Same color: a brightness change, which the running rainbow reads
+                # from the config. Brightness 0 stops it, so bring it back after.
+                was_off = cfg["percent"] <= 0
+                mod.cmd_brightness(cfg, dev, percent)
+                if persist:
+                    if was_off and percent > 0:
+                        self._start_cycle(mod, cfg)
+                    self._emit_cfg(self._cfg())
+                return
+            persist = True   # a new color replaces the rainbow right away
         try:
             if persist:
                 cfg = self._cfg()
@@ -143,6 +176,11 @@ class DeviceWorker(QThread):
         except SystemExit:
             return
         cfg = self._cfg()
+        if on and isinstance(cfg.get("cycle"), dict):
+            err = self._start_cycle(mod, cfg)
+            self._emit_cfg(self._cfg())
+            self.op_done.emit("power", err is None, err or "Rainbow on")
+            return
         try:
             if on:
                 mod.cmd_restore(cfg, dev)
@@ -181,11 +219,36 @@ class DeviceWorker(QThread):
             self._emit_cfg(cfg)
             self.op_done.emit("rainbow", True, "Rainbow " + ("on" if on else "off"))
         except PermissionError:
+            # The deprecated spelling: the root-owned system CLI may predate rainbow-oem.
             self._run_cli(["rainbow", "on" if on else "off"])
             self._emit_cfg(self._cfg())
             self.op_done.emit("rainbow", True, "Rainbow " + ("on" if on else "off") + " (pkexec)")
         except SystemExit:
             self.op_done.emit("rainbow", False, "OEM rainbow not supported on this device")
+
+    def _op_cycle(self, mod, on):
+        try:
+            dev = self._ensure_device()
+        except SystemExit:
+            return
+        cfg = self._cfg()
+        if on:
+            err = self._start_cycle(mod, cfg)
+            self._emit_cfg(self._cfg())
+            self.op_done.emit("cycle", err is None, err or "Rainbow on")
+            return
+        if not isinstance(cfg.get("cycle"), dict):
+            return
+        # Back to the saved static color; cmd_set also stops the running cycle.
+        percent = str(mod.get_saved_static_state(cfg)[3])
+        try:
+            mod.cmd_set(cfg, dev, cfg["color"], percent)
+            self._emit_cfg(cfg)
+            self.op_done.emit("cycle", True, "Rainbow off")
+        except PermissionError:
+            self._run_cli(["set", cfg["color"], percent])
+            self._emit_cfg(self._cfg())
+            self.op_done.emit("cycle", True, "Rainbow off (pkexec)")
 
     SETTING_KEYS = ("idle_enabled", "idle_timeout_seconds", "day_off_enabled",
                     "latitude", "longitude")
@@ -199,9 +262,11 @@ class DeviceWorker(QThread):
         self.op_done.emit("settings", True, "Settings saved")
 
     # Idle dim/restore only drive the HID intensity; the saved config is untouched.
+    # They do nothing while the rainbow is the saved mode: its process would
+    # overwrite a dimmed frame right away.
     def _op_idle_dim(self, mod):
         cfg = self._cfg()
-        if cfg.get("autonomous") or cfg.get("percent", 0) <= 0:
+        if cfg.get("autonomous") or cfg.get("cycle") or cfg.get("percent", 0) <= 0:
             return
         try:
             dev = self._ensure_device()
@@ -213,7 +278,7 @@ class DeviceWorker(QThread):
 
     def _op_idle_restore(self, mod):
         cfg = self._cfg()
-        if cfg.get("autonomous") or cfg.get("percent", 0) <= 0:
+        if cfg.get("autonomous") or cfg.get("cycle") or cfg.get("percent", 0) <= 0:
             return
         try:
             dev = self._ensure_device()
@@ -232,10 +297,16 @@ class DeviceWorker(QThread):
                 forced = cfg.get("day_forced_off") or cfg.get("percent", 0) > 0
                 mod.cmd_off(cfg, dev)
                 cfg["day_forced_off"] = forced
+                mod.save_config(cfg)
+            elif isinstance(cfg.get("cycle"), dict):
+                cfg["day_forced_off"] = False
+                mod.save_config(cfg)   # before the cycle saves its own pid
+                self._start_cycle(mod, cfg)
+                cfg = self._cfg()
             else:
                 cfg["day_forced_off"] = False
                 mod.cmd_restore(cfg, dev)
-            mod.save_config(cfg)
+                mod.save_config(cfg)
         except (SystemExit, PermissionError):
             return
         self._emit_cfg(cfg)
@@ -261,13 +332,18 @@ class DeviceWorker(QThread):
         if not cfg.get("day_forced_off"):
             return
         cfg["day_forced_off"] = False
-        if cfg.get("percent", 0) <= 0:
-            try:
-                dev = self._ensure_device()
-                mod.cmd_restore(cfg, dev)
-            except (SystemExit, PermissionError):
-                pass
-        mod.save_config(cfg)
+        if isinstance(cfg.get("cycle"), dict):
+            mod.save_config(cfg)   # before the cycle saves its own pid
+            self._start_cycle(mod, cfg)
+            cfg = self._cfg()
+        else:
+            if cfg.get("percent", 0) <= 0:
+                try:
+                    dev = self._ensure_device()
+                    mod.cmd_restore(cfg, dev)
+                except (SystemExit, PermissionError):
+                    pass
+            mod.save_config(cfg)
         self._emit_cfg(cfg)
         self.op_done.emit("day_on", True, "Backlight restored")
 

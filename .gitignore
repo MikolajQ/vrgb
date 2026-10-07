@@ -17,3 +17,11 @@ __pycache__/
 
 # Logs
 *.log
+
+# Tests
+.pytest_cache/
+
+# Release build
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,69 @@
+name: CI / Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write        # create tags & GitHub releases
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.8", "3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest
+      - run: pytest -q
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compile all Python sources
+        run: python3 -m compileall -q vrgb.py suite tests
+      - name: Core and Suite versions match
+        run: |
+          core=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' vrgb.py)
+          suite=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' suite/vrgb_suite/__init__.py)
+          echo "core=$core suite=$suite"
+          test "$core" = "$suite"
+      - name: shellcheck
+        run: shellcheck -S warning install.sh uninstall.sh
+
+  # Commits that are not Conventional Commits are ignored by the analyzer; when no
+  # commit since the last tag warrants a release, this job succeeds without one.
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.event_name == 'push'
+    outputs:
+      released: ${{ steps.semrel.outputs.new_release_published }}
+      version: ${{ steps.semrel.outputs.new_release_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Run semantic-release
+        id: semrel
+        uses: cycjimmy/semantic-release-action@v6
+        with:
+          extra_plugins: |
+            @semantic-release/exec
+            conventional-changelog-conventionalcommits@8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
