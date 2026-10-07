@@ -62,7 +62,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Verified devices. Report IDs are read from each device's HID report descriptor;
 # the IDs here are the fallback when the descriptor cannot be read, and the
-# remaining fields carry what a descriptor cannot tell (models, modules).
+# remaining fields carry what a descriptor cannot tell (models, modules, rainbow).
 SUPPORTED_DEVICES = {
     "0018:00000B05:000019B6": {
         "hid_name": "ITE5570:00 0B05:19B6",
@@ -72,6 +72,7 @@ SUPPORTED_DEVICES = {
         ],
         "firmware_report_id": 0x0B,
         "color_report_id": 0x05,
+        "rainbow_supported": True,
         "required_modules": ["asus-nb-wmi"],
     },
     "0018:00000B05:00005570": {
@@ -84,6 +85,7 @@ SUPPORTED_DEVICES = {
         ],
         "firmware_report_id": 0x46,
         "color_report_id": 0x45,
+        "rainbow_supported": False,
     },
 }
 
@@ -96,7 +98,13 @@ LAMPARRAY_CONTROL_REPORT = 0x70
 HOST_BYTE = 0x00
 FIRMWARE_BYTE = 0x01
 
-VERSION = "1.0.0"
+ASUS_WMI_BASE = Path("/sys/kernel/debug/asus-nb-wmi")
+ASUS_WMI_METHOD_ID = ASUS_WMI_BASE / "method_id"
+ASUS_WMI_DEV_ID = ASUS_WMI_BASE / "dev_id"
+ASUS_WMI_CTRL_PARAM = ASUS_WMI_BASE / "ctrl_param"
+ASUS_WMI_DEVS = ASUS_WMI_BASE / "devs"
+
+VERSION = "0.4.0"
 PROJECT_URL = "https://github.com/vrgb-dev/vrgb"
 
 # ===== Utilities =====
@@ -389,6 +397,7 @@ def find_device():
                 ),
                 "attributes_report_id": report_ids.get(LAMPARRAY_ATTRIBUTES_REPORT),
                 "verified": score >= 90,
+                "rainbow_supported": profile.get("rainbow_supported", False),
                 "required_modules": profile.get("required_modules", []),
             }
 
@@ -531,6 +540,43 @@ def set_color(devinfo, r, g, b, intensity):
     hid_set_feature(devinfo["path"], devinfo["color_report_id"], payload)
 
 
+# ===== OEM Rainbow =====
+
+
+def asus_wmi_write(method_id: str, dev_id: str, ctrl_param: str):
+    ASUS_WMI_METHOD_ID.write_text(method_id)
+    ASUS_WMI_DEV_ID.write_text(dev_id)
+    ASUS_WMI_CTRL_PARAM.write_text(ctrl_param)
+
+    try:
+        _ = ASUS_WMI_DEVS.read_text(errors="ignore")
+    except OSError as e:
+        debug(f"ASUS WMI devs read failed: {e}")
+        die("OEM rainbow not available: ASUS WMI exposed no usable device.")
+
+
+def asus_wmi_rainbow(enable: bool):
+    debug(f"asus_wmi_rainbow enable={enable}")
+
+    if not ASUS_WMI_BASE.exists():
+        die("OEM rainbow not supported on this system.")
+
+    for p in (
+        ASUS_WMI_METHOD_ID,
+        ASUS_WMI_DEV_ID,
+        ASUS_WMI_CTRL_PARAM,
+        ASUS_WMI_DEVS,
+    ):
+        if not p.exists():
+            die("OEM rainbow interface incomplete.")
+
+    asus_wmi_write(
+        "0x00000001",
+        "0x0005002f",
+        "0x00000000" if enable else "0x00000001",
+    )
+
+
 # ===== Profiles =====
 
 
@@ -637,16 +683,16 @@ __   ___ __ __ _| |__
   \_/ |_|  \__, |_.__/
            |___/
 
-Native RGB control for ASUS Vivobook keyboards on Linux
+RGB control for ASUS HID LampArray keyboards
 
-VRGB """
+Version: """
         + VERSION
         + """
 """
         + PROJECT_URL
         + """
 
-Core CLI • Desktop Suite • HID LampArray
+No kernel mods. No daemon. Just HID.
 """
     )
 
@@ -661,6 +707,11 @@ def cmd_status(cfg, devinfo):
     confirmed_models = devinfo.get("confirmed_models", [])
     if confirmed_models:
         print("Confirmed on:", ", ".join(confirmed_models))
+
+    print(
+        "OEM rainbow:",
+        "supported" if devinfo.get("rainbow_supported", False) else "not supported / unknown",
+    )
 
     required_modules = devinfo.get("required_modules", [])
     if required_modules:
@@ -743,6 +794,53 @@ def cmd_auto(cfg, devinfo, state):
         save_config(cfg)
 
 
+def cmd_rainbow(cfg, devinfo, state):
+    enable = state == "on"
+    debug(f"cmd_rainbow state={state}")
+    cfg.pop("cycle", None)
+
+    if not devinfo.get("rainbow_supported", False):
+        if enable:
+            die(
+                "OEM rainbow is not supported for this device mapping. "
+                "Static HID color control should still work."
+            )
+
+        r, g, b, p, intensity = get_saved_static_state(cfg)
+        debug(
+            "cmd_rainbow off on unsupported device -> "
+            f"restore percent={p} intensity={intensity}"
+        )
+        set_firmware_mode(devinfo, False)
+        set_color(devinfo, r, g, b, intensity)
+        cfg["percent"] = p
+        cfg["autonomous"] = False
+        save_config(cfg)
+        print("OEM rainbow is not supported for this device mapping; restored saved static state.")
+        return
+
+    # debugfs is root-only (0700). Checked before touching the keyboard, and
+    # because Path.exists() reports a permission error as a missing path on
+    # newer Pythons.
+    if os.geteuid() != 0:
+        die("OEM rainbow requires root: run `sudo vrgb rainbow-oem on|off`.")
+
+    if enable:
+        set_firmware_mode(devinfo, True)
+        asus_wmi_rainbow(True)
+        cfg["autonomous"] = True
+        save_config(cfg)
+    else:
+        asus_wmi_rainbow(False)
+        r, g, b, p, intensity = get_saved_static_state(cfg)
+        debug(f"cmd_rainbow off -> restore percent={p} intensity={intensity}")
+        set_firmware_mode(devinfo, False)
+        set_color(devinfo, r, g, b, intensity)
+        cfg["percent"] = p
+        cfg["autonomous"] = False
+        save_config(cfg)
+
+
 def owns_cycle(cfg):
     cycle = cfg.get("cycle")
     return isinstance(cycle, dict) and cycle.get("pid") == os.getpid() and cfg["percent"] > 0
@@ -804,10 +902,7 @@ def save_cycle(cfg, percent=None, period=None, fps=None):
     if fps is None:
         fps = 20.0
 
-    try:
-        percent = clamp(int(percent), 0, 100)
-    except (TypeError, ValueError):
-        die("percent must be a whole number from 0 to 100 (example: 50)")
+    percent = clamp(int(percent), 0, 100)
 
     try:
         period = float(period)
@@ -927,6 +1022,7 @@ def main():
   vrgb brightness 0-100
   vrgb auto on|off
   vrgb rainbow             (software rainbow: cycle 100 4)
+  vrgb rainbow-oem on|off  (OEM firmware rainbow, sudo)
   vrgb cycle [percent] [period_seconds] [fps]
   vrgb off
   vrgb restore
@@ -952,6 +1048,7 @@ Example: vrgb --debug status
         "brightness",
         "auto",
         "rainbow",
+        "rainbow-oem",
         "cycle",
         "off",
         "restore",
@@ -998,6 +1095,18 @@ Example: vrgb --debug status
             print(f"Rainbow cycle running in the background ({RESTORE_SERVICE}).")
         else:
             run_cycle(cfg, devinfo)
+
+    elif cmd in ("rainbow", "rainbow-oem"):
+        if len(args) < 2 or args[1] not in ["on", "off"]:
+            die("rainbow-oem requires 'on' or 'off'")
+        if cmd == "rainbow":
+            # Deprecated alias, kept so scripts and older frontends keep working.
+            print(
+                "Warning: `vrgb rainbow on|off` is deprecated; use `vrgb rainbow-oem on|off`.",
+                file=sys.stderr,
+            )
+        devinfo = find_device()
+        cmd_rainbow(cfg, devinfo, args[1])
 
     elif cmd == "off":
         devinfo = find_device()
@@ -1047,7 +1156,10 @@ def run():
     """Console entry point (also used by packaged installs)."""
     try:
         main()
-    except PermissionError:
+    except PermissionError as e:
+        path = getattr(e, "filename", None)
+        if path and str(path).startswith(str(ASUS_WMI_BASE)):
+            die("Permission denied to ASUS WMI debugfs. OEM rainbow requires sudo/root.")
         die("Permission denied to HID device. Run with sudo or install a udev rule.")
 
 

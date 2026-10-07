@@ -1,505 +1,452 @@
 <p align="center">
-  <img src="assets/vrgblogodark.png" width="500"><br>
+  <img src="assets/vrgblogodark.png" width="500" alt="VRGB">
+  <br><br>
+  <strong>Native RGB control for ASUS Vivobook keyboards on Linux.</strong>
   <br>
-  RGB control for ASUS Vivobook HID LampArray keyboards on Linux<br>
-  <br>
+  Lightweight HID LampArray control with a CLI, optional desktop Suite, profiles, automation, and effects.
+  <br><br>
   <a href="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml"><img src="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
-
-
-
 ## Overview
 
-VRGB is a lightweight Linux CLI utility for controlling RGB keyboards on
-Vivobook ASUS laptops that expose the HID LampArray interface.
+VRGB controls RGB keyboard lighting on supported ASUS Vivobook laptops
+that expose a standard HID LampArray interface.
 
-It comes in two parts:
+It has two parts:
 
-- **VRGB Core** — the `vrgb` command line tool. A single Python file, standard
-  library only, no daemon. It is also an importable module for other frontends.
-- **VRGB Suite** (optional) — a PyQt6 GUI and tray on top of Core, with desktop
-  integration and automation (idle auto-off, daytime-off). It lives in `suite/`
-  and never changes how Core works.
+-   **VRGB Core** --- the `vrgb` command-line tool. A single Python file
+    using only the standard library, with no required background daemon.
+    Core owns device discovery, HID communication, configuration,
+    profiles, effects, and restore behavior.
+-   **VRGB Suite** --- an optional PyQt6 desktop frontend built on Core.
+    It adds a GUI, system tray controls, live preview, unified
+    brightness control, profiles, idle auto-off, daytime automation, and
+    desktop integration without duplicating the HID implementation.
 
+VRGB communicates directly with the keyboard controller through Linux
+`hidraw`. It does not require a kernel patch, Windows driver, or vendor
+RGB utility.
 
-**Why this exists:**
+### Why this exists
 
-I bought a Vivobook S14 and put Fedora on it for school and work. Fn brightness worked, but the keyboard was stuck on white and none of the usual ASUS RGB tools did anything. After digging into it, I found the keyboard wasn’t using the typical ASUS control path at all.
+VRGB started on an ASUS Vivobook S14 running Fedora KDE. Keyboard brightness
+worked under Linux, but the RGB backlight was stuck on white and the
+usual ASUS lighting tools did not control it.
 
-VRGB is just a tool built around that discovery to get simple RGB control working on Linux without touching the kernel or running a daemon.
+The keyboard turned out to expose an ITE5570 HID LampArray controller.
+VRGB grew from a small command-line tool for that controller into a
+community-tested Core + Suite application supporting multiple Vivobook
+models.
 
-<br>
-
-**The project was developed and validated on:**
-
-ITE5570 (HID_ID: 0018:00000B05:000019B6)  
-- ASUS Vivobook S14 series (S5406SA / S5406SA-WH79)  
-- firmware: 0x0B  
-- color: 0x05  
-- note: some 0x19B6 systems may require `asus-nb-wmi` to be loaded before HID control works  
-
-**Community validated:**
-
-ITE5570 (HID_ID: 0018:00000B05:00005570)  
-- ASUS Vivobook S series  
-- confirmed on S16 M5606K, S16 M5606WA, and S14 M5406WA  
-- firmware: 0x46  
-- color: 0x45  
-
-<br>
-
-Unlike some RGB tools, VRGB does not rely on kernel patches, vendor utilities, background daemons, controller hacks, or reverse-engineered Windows drivers. VRGB simply communicates with the keyboard controller through the Linux HID subsystem. 
-
-<br>
-
-
-**Control path:**
-
-    vrgb.py
-       ↓
-    /dev/hidrawX
-       ↓
-    ITE5570 keyboard controller
-       ↓
-    RGB lighting
-
-Current Stable Release: see [Releases](https://github.com/vrgb-dev/vrgb/releases)
-    
-
-## Example Usage
+## Screenshots
 
 <p align="center">
-  <img src="assets/vrgb-demo.png" width="400">
+  <img src="assets/vrgb-demo.png" width="500" alt="VRGB Suite">
 </p>
-
-
 ## Features
 
--   Rainbow mode with adjustable speed and brightness, resumed after logout and reboot
+### Core
+
 -   Static RGB color control
--   Fine brightness scaling (0–100%)
--   Custom profiles
--   Firmware autonomous mode toggle
--   OEM firmware rainbow (deprecated; sudo required, model-dependent)
--   Debug diagnostics
--   Required module checks for affected devices
+-   Fine brightness control from 0--100%
+-   Software rainbow with saved state and restore support
+-   Advanced adjustable color cycle
+-   Named profiles
+-   Firmware/autonomous lighting mode
 -   Persistent configuration
--   Installer and uninstaller included
--   Non-root daily usage via udev permissions
--   Optional KDE autostart restore
--   Optional systemd user autostart restore (any desktop environment)
+-   Automatic HID LampArray report discovery
+-   Verified device mappings with known-good fallback report IDs
+-   Debug diagnostics and compatibility reporting
+-   Non-root daily use through udev permissions
+-   Optional saved-state restore at login
+-   Importable Python module for other frontends
+-   Standard-library-only Core
 
+### Suite
 
+-   PyQt6 desktop GUI and system tray
+-   Color wheel, hex input, preset colors, and live preview
+-   Unified keyboard brightness control
+-   Hardware Fn brightness synchronization where supported
+-   Rainbow toggle in the window and tray
+-   Profile save/load/delete
+-   Power and firmware-mode controls
+-   Idle auto-off with activity wake
+-   Optional daytime-off automation using locally calculated
+    sunrise/sunset
+-   XDG desktop autostart
+-   Idle/session integration across GNOME, KDE Plasma, compatible Wayland compositors, and X11
+
+For implementation details, session backends, report discovery, Python
+integration, and internal architecture, see
+[`TECHNICAL.md`](TECHNICAL.md).
 
 ## Supported Hardware
 
-VRGB supports ASUS laptops that expose the **ITE5570 HID LampArray controller**.
+VRGB's **verified hardware support** currently consists of ASUS Vivobook
+laptops using the ITE5570 HID LampArray controller. Core can also detect
+unverified devices whose HID report descriptors expose the standard
+LampArray reports VRGB requires.
 
-Support is based on **verified device mappings**, not specific laptop models. Some ASUS laptops share the same HID controller and report IDs across different screen sizes and CPU platforms.
+Support is based primarily on the HID device and report layout rather
+than the laptop's screen size, processor, or marketing name. Verified
+mappings record hardware that has been physically tested, while
+descriptor discovery can identify compatible-looking LampArray devices
+without hard-coding every model.
 
-The firmware and color report IDs are the standard HID LampArray `LampArrayControlReport` and `LampRangeUpdateReport`. VRGB reads them from the device's HID report descriptor at runtime; the IDs listed below are what the verified devices declare, and are used as a fallback if the descriptor cannot be read.
+Matching a known HID ID or exposing the expected LampArray reports does
+**not** by itself guarantee compatibility. Some systems may require
+model-specific controller initialization or other platform behavior that
+a HID descriptor cannot describe. A device is considered verified only
+after physical hardware testing.
 
 ### Verified mappings
 
-**ITE5570 (HID_ID: 0018:00000B05:000019B6)**  
-- confirmed on: ASUS Vivobook S14 series (S5406SA / S5406SA-WH79)  
-- firmware report: `0x0B`  
-- color report: `0x05`
-- required module: `asus-nb-wmi`
+  -------------------------------------------------------------------------------------------
+  HID ID                     Confirmed       Firmware report     Color report Notes
+                             systems
+  -------------------------- -------------- ---------------- ---------------- ---------------
+  `0018:00000B05:000019B6`   ASUS Vivobook            `0x0B`           `0x05` Requires
+                             S14 S5406SA /                                    `asus-nb-wmi`
+                             S5406SA-WH79                                     on the verified
+                                                                              mapping
 
-**ITE5570 (HID_ID: 0018:00000B05:00005570)**  
-- confirmed on:
-  - ASUS Vivobook S16 (M5606K)
-  - ASUS Vivobook S16 (M5606WA)
-  - ASUS Vivobook S14 (M5406WA)
-- firmware report: `0x46`  
-- color report: `0x45`  
+  `0018:00000B05:00005570`   ASUS Vivobook            `0x46`           `0x45` Community
+                             S16 M5606K,                                      validated
+                             S16 M5606WA,
+                             S14 M5406WA
+  -------------------------------------------------------------------------------------------
 
-### Example device identifiers
+VRGB prefers verified mappings. For other HID LampArray devices, Core can
+inspect the HID report descriptor at runtime, discover the required
+LampArray report IDs, and expose a matching device as **unverified**.
 
-    HID_NAME=ITE5570:00 0B05:19B6
-    HID_ID=0018:00000B05:000019B6
+If your Vivobook exposes a similar controller, run:
 
-    HID_NAME=ITE5570:00 0B05:5570
-    HID_ID=0018:00000B05:00005570
+``` bash
+vrgb --debug status
+```
 
+If it works --- or almost works --- please submit a compatibility report
+with your laptop model, `HID_ID`, `HID_NAME`, debug output, and the
+commands you tested.
 
-## Compatibility
-
-VRGB scans available `hidraw` devices and selects compatible ASUS keyboard controllers automatically. Verified devices are preferred. Any other device whose HID report descriptor declares a LampArray (usage page `0x59`) is also detected and controlled through its standard reports, lighting all of its lamps with one color; `vrgb status` marks it as unverified.
-
-Multiple ASUS laptops appear to share the same ITE5570 controller and HID LampArray protocol. If your system exposes a similar device, there is a strong chance VRGB will work.
-
-Support expands through **verified device mappings** as new hardware is tested: a verified mapping adds known models and required kernel modules, which a descriptor cannot describe. Stability and correctness are prioritized over broad but unreliable compatibility.
-
-### Required modules
-
-Some ITE5570 systems may ignore HID LampArray commands until the ASUS WMI module has initialized the hardware.
-
-For affected mappings, VRGB checks whether the required module is loaded and prints clear instructions if it is missing.
-
-Example manual load:
-
-    sudo modprobe asus-nb-wmi
-
-Example load at boot:
-
-    echo asus-nb-wmi | sudo tee /etc/modules-load.d/asus-nb-wmi.conf
-
-If VRGB works (or does not work) on your system, please submit a compatibility report including:
-
-    vrgb --debug status
-
-Community reports help identify new supported devices quickly.
-
-See reports here:  
-https://github.com/vrgb-dev/vrgb/issues/1
-
+Compatibility reports: [Issue
+#1](https://github.com/vrgb-dev/vrgb/issues/1)
 
 ## Quick Install
 
-Clone the repository and run the installer. It asks whether to install
-**Core** (CLI only) or **Suite** (Core + GUI/tray, needs PyQt6); pass `core` or
-`suite` to skip the question.
+Clone the repository and run the installer as your normal user:
 
-    git clone https://github.com/vrgb-dev/vrgb.git
-    cd vrgb
-    chmod +x install.sh
-    ./install.sh            # or: ./install.sh core | ./install.sh suite
+``` bash
+git clone https://github.com/vrgb-dev/vrgb.git
+cd vrgb
+chmod +x install.sh
+./install.sh
+```
 
-The udev rule gives the logged-in user access to the keyboard right away
-(`uaccess`); membership in the `vrgb` group applies after the next login.
+The installer asks whether you want:
 
-Then pick a color, or start the rainbow:
+-   **Core** --- CLI only
+-   **Suite** --- Core plus GUI/tray integration and PyQt6
 
-    vrgb set 00aaff 70
-    vrgb rainbow
+You can also choose directly:
 
+``` bash
+./install.sh core
+./install.sh suite
+```
 
-**Note:**
-Keyboard color persists on reboot, but may reset to firmware default after a full power cycle.
-Use the installer's autostart option (or set it manually) to reapply your configuration automatically.
+The installer configures device access so normal VRGB use does not
+require root. If group membership is added during installation, log out
+and back in before relying on that group access.
 
+Do **not** run the installer itself with `sudo`; it requests elevated
+privileges only for the system files that need them.
 
+Then try:
 
-## VRGB Suite (GUI, tray and automation)
+``` bash
+vrgb set 00aaff 70
+vrgb rainbow
+```
 
-The Suite is a PyQt6 frontend over Core: it imports `vrgb` as a module and drives
-the keyboard in-process, so the HID protocol and config logic stay in Core — no
-duplicated device code. Original GUI by Matt Warner
-([@mrw1986](https://github.com/mrw1986)).
+## Everyday Usage
 
-**Features**
+### Status
 
-- HS color wheel + value slider, hex entry, and preset swatches
-- Live preview while you drag (throttled), persisted on release
-- Unified brightness slider (0–100%) that is **tied to the FN+F4 / FN+F3 keys**: it
-  decomposes brightness into the firmware backlight step (`asus::kbd_backlight`, set
-  via logind) and vrgb's HID intensity so the two layers never double-dim, and it
-  follows the firmware level (via the kernel's `brightness_hw_changed` notification,
-  polling only while the window is open) so the hardware keys move the slider too.
-  Falls back to pure-HID brightness if the LED node / logind is unavailable.
-- A **Rainbow** toggle (window and tray) that runs `vrgb rainbow`: it keeps running
-  after the window closes, comes back after logout/reboot, and follows the
-  brightness slider. Picking a color switches back to that static color.
-- A power on/off toggle and firmware/autonomous mode toggle
-- Profile manager (save / load / delete)
-- System-tray applet: on/off, Rainbow, a Brightness submenu, a Color submenu (preset
-  swatches + a "More colors…" dialog), and profile loading; closing the window
-  hides it to the tray. (Submenus rather than embedded widgets, because KDE renders
-  tray menus over DBusMenu, which does not support embedded widgets.)
-- **Turn off after inactivity** — the backlight returns on the next key/mouse
-  input. Only the live HID intensity changes; the saved brightness stays. It is
-  paused while the rainbow is on.
-  Idle detection is picked automatically:
+``` bash
+vrgb status
+```
 
-  | Session | Backend |
-  |---|---|
-  | GNOME | Mutter IdleMonitor (D-Bus, event-driven) |
-  | KDE Plasma (Wayland), sway, Hyprland, labwc / wayfire (LXQt), niri, COSMIC | Wayland `ext-idle-notify-v1` (event-driven, no extra dependencies) |
-  | X11 sessions (LXQt, XFCE, KDE X11, …) | XScreenSaver extension (`libXss`); checks only when the timeout could have passed |
+### Set a color
 
-- **Keep off during daytime** — between sunrise and sunset at the configured
-  location the backlight is switched off; it comes back at sunset if it was on.
-  Sun times are computed locally (no network); the location is suggested offline
-  from the system timezone's reference city (e.g. `Europe/Warsaw` → Warsaw).
-- **Session start** — started at login (`vrgb-gui --tray`), it restores your
-  lighting, or keeps it off if it is daytime and daytime-off is on.
-- Falls back to a Polkit (`pkexec`) password prompt if the keyboard is not
-  accessible in your session; it only ever runs the root-owned system `vrgb`.
+``` bash
+vrgb set RRGGBB [brightness]
+```
 
-**Running it on every desktop**
+Example:
 
-- Started from a terminal, `vrgb-gui` moves itself to the background and gives the
-  shell back; closing the window leaves it running in the tray.
-  `vrgb-gui --foreground` keeps it attached to the terminal (Ctrl+C stops it).
-- Only one copy runs: starting `vrgb-gui` again opens the window of the running
-  one; `vrgb-gui --quit` or the tray menu's Quit stops it.
-- `vrgb-gui --tray` keeps running in the background even without a system tray
-  (e.g. sway without a bar), so the automation still works.
-- Login autostart: "Start VRGB in the tray at login" writes an XDG autostart entry
-  (GNOME, KDE, LXQt, XFCE, Cinnamon, …). On compositors without XDG autostart
-  (sway, Hyprland, …) add `exec vrgb-gui --tray` to the compositor config, or — if
-  your session starts `graphical-session.target` (e.g. via uwsm) — enable the user
-  unit: `systemctl --user enable --now vrgb-gui.service`.
-- The tray icon needs a StatusNotifierItem host (KDE/LXQt/XFCE panels, waybar's
-  `tray` module, or the AppIndicator extension on GNOME).
+``` bash
+vrgb set 00aa55 65
+```
 
-**Layout**
+### Change brightness
 
-    suite/vrgb_suite/   app.py (window, tray, entry point), worker.py (device I/O
-                        thread), idle.py, sun.py, system.py, widgets.py, core.py
-    suite/data/         .desktop launcher and systemd user unit
-    suite/pyproject.toml  for distro packages (package and command `vrgb-gui`)
+``` bash
+vrgb brightness 80
+```
 
-Run from a checkout without installing: `PYTHONPATH=.:suite python3 -m vrgb_suite`.
+### Rainbow
 
+``` bash
+vrgb rainbow
+```
 
+`rainbow` is the simple software effect. It uses full brightness and a
+four-second color cycle by default.
 
-## Command List
+For custom brightness, speed, or frame rate:
 
-Show Current Status
+``` bash
+vrgb cycle [brightness] [period_seconds] [fps]
+```
 
-    vrgb status
+Example:
 
-Set RGB Color
+``` bash
+vrgb cycle 50 10
+```
 
-    vrgb set RRGGBB [brightness %]
+The active rainbow/cycle is saved as the current mode and can be resumed
+by `vrgb restore`. Static commands such as `set`, `auto`, or loading a
+profile take over cleanly.
 
-*Example:*
+### Profiles
 
-    vrgb set 00aa55 65
+``` bash
+vrgb profile save fedorablue
+vrgb profile load fedorablue
+vrgb profile list
+vrgb profile delete fedorablue
+```
 
-Change Brightness
+### Turn lighting off
 
-    vrgb brightness 80
+``` bash
+vrgb off
+```
 
-Rainbow
+### Restore saved state
 
-    vrgb rainbow
+``` bash
+vrgb restore
+```
 
-Full brightness, one full color spectrum every 4 seconds: a shortcut for
-`vrgb cycle 100 4`. For other settings:
+### Firmware/autonomous mode
 
-    vrgb cycle [percent] [period_seconds] [fps]
+Let the keyboard firmware control lighting:
 
-*Example (half brightness, a slower 10-second spectrum):*
-
-    vrgb cycle 50 10
-
-The rainbow is saved as the current mode, so `vrgb restore` (and the autostart
-restore options below) resume it after a logout or reboot. When the systemd
-restore service is enabled, `vrgb rainbow` and `vrgb cycle` hand it to the
-service and return immediately; otherwise they run in the foreground.
-
-While it runs, other commands take over cleanly: `set`, `auto` or loading a
-profile stop the rainbow and replace it, `brightness` changes its brightness, and
-`off` pauses it until the next `restore`. Pressing Ctrl+C stops it and it is not
-resumed at the next login.
-    
-Save Profile (Current State)
-
-    vrgb profile save fedorablue
-    
-Load Profile
-
-    vrgb profile load fedorablue
-    
-Delete Profile
-
-    vrgb profile delete fedorablue
-    
-List Saved Profiles
-
-    vrgb profile list
-
-Turn Lighting Off
-
-    vrgb off
-
-Restore Saved State
-
-    vrgb restore
-
-If the saved mode is the rainbow, `restore` resumes it and keeps
-running until another command takes over.
-
-Enable firmware lighting (Firmware Autonomous Mode)
-
-    vrgb auto on
+``` bash
+vrgb auto on
+```
 
 Return control to VRGB:
 
-    vrgb auto off
+``` bash
+vrgb auto off
+```
 
-Debug Mode
+### Debug
 
-    vrgb --debug status
+``` bash
+vrgb --debug status
+```
 
-About
+### About
 
-    vrgb about
+``` bash
+vrgb about
+```
 
-Deprecated: OEM Firmware Rainbow (requires sudo, model-dependent)
+## VRGB Suite
 
-    sudo vrgb rainbow-oem on
-    sudo vrgb rainbow-oem off
+Install the Suite with:
 
-Switches the keyboard to its built-in firmware animation through the ASUS WMI
-debug interface. It only works on some models and offers no speed or color
-control; prefer `vrgb rainbow`. The older spelling `vrgb rainbow on|off` is an
-alias.
+``` bash
+./install.sh suite
+```
 
+Launch it from your desktop application menu or run:
 
-## Using vrgb as a library
+``` bash
+vrgb-gui
+```
 
-`vrgb.py` is both the CLI and a plain Python module (standard library only), so
-frontends can reuse the HID protocol and config handling instead of copying them:
+The Suite uses Core directly for device and configuration logic. It adds
+desktop-friendly controls without maintaining a separate RGB
+implementation.
 
-    import vrgb
+The main window provides color selection, brightness, Rainbow, power,
+firmware mode, and profile management. Closing the window leaves VRGB
+available in the system tray.
 
-    dev = vrgb.find_device()                 # dict: path, model, report ids, …
-    cfg = vrgb.load_config()
-    vrgb.cmd_set(cfg, dev, "00aaff", 70)     # same as `vrgb set 00aaff 70`
-    vrgb.set_color(dev, 255, 0, 0, vrgb.percent_to_intensity(40))  # live, not saved
+The tray provides quick access to power, Rainbow, brightness, colors,
+profiles, and the main window.
 
-The `cmd_*` functions behave like the matching CLI commands (they update and
-save `~/.config/vrgb/config.json`); `set_color` / `set_firmware_mode` only talk
-to the device. `save_config` writes atomically and keeps keys it does not know,
-so a frontend may store its own settings in the same file.
+### Automation
 
-Distro packages install the module (`pyproject.toml`); `./install.sh` keeps
-installing the single file to `/usr/local/bin/vrgb`.
+The Suite can:
 
+-   turn the keyboard off after inactivity and restore it on input;
+-   keep lighting off during daytime hours using locally calculated
+    sunrise/sunset;
+-   restore the saved lighting state when the desktop session starts.
 
+"Start VRGB in the tray at login" uses the standard XDG autostart
+mechanism. Sessions or compositors that do not honor XDG autostart can
+launch `vrgb-gui --tray` from their own session configuration; an
+optional systemd user unit is also provided for compatible sessions.
 
-## Manual Installation
+Tray availability depends on the desktop environment. KDE Plasma and
+other StatusNotifierItem-capable panels support it directly; GNOME
+generally requires an AppIndicator-style extension. Automation itself
+does not depend on a visible tray icon.
 
-Install Binary
+Additional desktop/backend details are documented in
+[`TECHNICAL.md`](TECHNICAL.md).
 
-    sudo install -m 755 vrgb.py /usr/local/bin/vrgb
+## Configuration
 
-Create Access Group
+VRGB stores user configuration in:
 
-    sudo groupadd -f vrgb
-    sudo usermod -aG vrgb $USER
+``` text
+~/.config/vrgb/config.json
+```
 
-Install udev Rule
+This includes the saved lighting state, profiles, effect state, and
+Suite settings.
 
-Create:
+Keyboard lighting may retain its state across a reboot but return to
+firmware defaults after a full power cycle. Enabling VRGB startup
+restore reapplies the saved state when you log in.
 
-    /etc/udev/rules.d/99-vrgb.rules
+## Troubleshooting
 
-Contents:
+### No compatible keyboard found
 
-    SUBSYSTEM=="hidraw", KERNELS=="i2c-ITE5570*", MODE="0660", GROUP="vrgb"
+Run:
 
-Reload udev
+``` bash
+vrgb --debug status
+```
 
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger
+Check the HID identifiers:
 
-Log out and log back in afterward.
+``` bash
+grep -H . /sys/class/hidraw/*/device/uevent | grep -E 'HID_ID|HID_NAME'
+```
 
+Descriptor discovery can identify compatible-looking LampArray hardware,
+but it cannot prove that the laptop initializes or exposes the
+controller exactly like a verified system. Include the complete debug
+output when reporting an unverified device.
 
+### S5406SA / `0B05:19B6` does not respond
 
-## Optional KDE Autostart Restore
+The verified `0018:00000B05:000019B6` mapping requires `asus-nb-wmi`.
 
-Create:
+Check/load it with:
 
-    ~/.config/autostart/vrgb.desktop
+``` bash
+lsmod | grep asus_nb_wmi
+sudo modprobe asus-nb-wmi
+```
 
-Contents:
+If VRGB works after loading it, the module can be configured to load at
+boot:
 
-    [Desktop Entry]
-    Type=Application
-    Exec=/usr/local/bin/vrgb restore
-    Hidden=false
-    NoDisplay=false
-    X-GNOME-Autostart-enabled=true
-    Name=VRGB Restore
-    Comment=Restore keyboard RGB state
+``` bash
+echo asus-nb-wmi | sudo tee /etc/modules-load.d/asus-nb-wmi.conf
+```
 
+### Permission denied
 
+Log out and back in after installation if your user was newly added to
+the `vrgb` group. You can also reconnect/retrigger the device after the
+udev rule is installed.
 
-## Optional systemd Autostart Restore (any desktop environment)
-
-The KDE autostart option above relies on the XDG autostart spec, which not
-every window manager or compositor honors (tiling WMs such as Hyprland or
-Sway, for example). A systemd `--user` unit works the same way regardless
-of desktop environment, and the installer can set it up for you.
-
-Manual install:
-
-    mkdir -p ~/.config/systemd/user
-    install -m 644 systemd/vrgb-restore.service ~/.config/systemd/user/vrgb-restore.service
-    systemctl --user daemon-reload
-    systemctl --user enable vrgb-restore.service
-
-Contents of `systemd/vrgb-restore.service`:
-
-    [Unit]
-    Description=Restore VRGB keyboard lighting state
-    After=graphical-session.target
-
-    [Service]
-    Type=exec
-    ExecStart=/usr/local/bin/vrgb restore
-    Restart=on-failure
-    RestartSec=2
-
-    [Install]
-    WantedBy=graphical-session.target
-
-The unit runs `vrgb restore` at the start of your graphical session, so it will
-apply from your next login onward. A static restore exits right away; a saved
-rainbow keeps the service running for the session.
-
-You can install both the KDE and systemd autostart options at once if you
-like; they do the same thing and won't conflict (if both resume a cycle, the
-later one takes over and the other exits).
-
-
+For deeper diagnostics and implementation details, see
+[`TECHNICAL.md`](TECHNICAL.md).
 
 ## Uninstall
 
-    ./uninstall.sh
+From the repository:
 
-Removes:
+``` bash
+./uninstall.sh
+```
 
--   /usr/local/bin/vrgb
--   the udev rule
--   optional KDE and/or systemd autostart entries
+Run the uninstaller as your normal user, not with `sudo`. It removes
+VRGB's installed Core/Suite files, device-access rule, desktop
+integration, and VRGB-created startup entries.
 
+Your personal configuration can be retained or removed according to the
+uninstaller's prompts.
 
+## Contributors & Thanks
 
-## Future Development
+VRGB began as a small personal compatibility tool and became a broader
+project through community code, hardware testing, debugging, and ideas.
 
-- expanded ASUS hardware compatibility
-- ~~simple GUI frontend~~ — added (`vrgb-gui`, PyQt6)
-- ~~color picker / brightness control~~ — added
-- ~~profile management~~ — added (CLI + GUI)
-- packaged distribution (RPM / Flatpak)
+Special thanks to:
 
-With future updates in mind, this project will aim to continue to be as efficient and lightweight as possible.
+-   **Matt Warner ([@mrw1986](https://github.com/mrw1986))** --- created
+    the original PyQt GUI/tray foundation that became the starting point
+    for VRGB Suite.
+-   **MikolajQ ([@MikolajQ](https://github.com/MikolajQ))** --- expanded
+    the GUI work into the broader Suite architecture and desktop
+    integration.
+-   **MHS-20 ([@MHS-20](https://github.com/MHS-20))** --- contributed
+    software rainbow/cycle support, suspend recovery, startup/restore
+    work, dynamic LampArray report discovery, tests/CI, and community
+    integration.
+-   **Bartolomiv ([@Bartolomiv](https://github.com/Bartolomiv))** ---
+    contributed Plasma widget work.
+-   **Hardware testing and compatibility research:** `jeffatgit`,
+    `rickhg12hs`, `Vtransparent`, `pylandt`, `aryaveersr`, and everyone
+    else who submitted hardware reports, tested unsupported systems,
+    opened issues, reviewed behavior, or helped identify compatible
+    Vivobook models.
 
-
-
-## Changelog
-
-Release notes are generated from commit messages and published on [GitHub Releases](https://github.com/vrgb-dev/vrgb/releases).
-
-
+Some contributions were later superseded or integrated differently as
+the architecture evolved; they are still part of the work that got VRGB
+here.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug fixes, hardware reports, device mappings, desktop improvements, and
+documentation contributions are welcome.
 
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull
+request. Developers interested in the internals should also read
+[`TECHNICAL.md`](TECHNICAL.md).
 
+CI validates tests, Python compilation, version consistency, and install
+scripts. Releases are intentionally manual and follow physical
+validation on supported hardware.
+
+## Releases and Changelog
+
+See [GitHub
+Releases](https://github.com/vrgb-dev/vrgb/releases).
+
+Release tags and GitHub releases are created deliberately after
+validation; passing CI does not automatically publish a release.
 
 ## License
 
-MIT License
+VRGB is released under the [MIT License](LICENSE).
 
 ## Repository
 
