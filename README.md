@@ -7,6 +7,7 @@
   <br><br>
   <a href="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml"><img src="https://github.com/vrgb-dev/vrgb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
+
 ## Overview
 
 VRGB controls RGB keyboard lighting on supported ASUS Vivobook laptops
@@ -41,8 +42,9 @@ models.
 ## Screenshots
 
 <p align="center">
-  <img src="assets/vrgb-demo.png" width="500" alt="VRGB Suite">
+  <img src="assets/vrgb-demo.png" width="900" alt="VRGB Suite">
 </p>
+
 ## Features
 
 ### Core
