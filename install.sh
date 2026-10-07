@@ -73,6 +73,7 @@ if [[ "$EDITION" == "suite" ]]; then
     sudo rm -rf "$SUITE_LIB/vrgb_suite"
     sudo install -d "$SUITE_LIB/vrgb_suite"
     sudo install -m 644 suite/vrgb_suite/*.py "$SUITE_LIB/vrgb_suite/"
+    sudo install -Dm644 suite/data/vrgb.png "$SUITE_LIB/data/vrgb.png"
     sudo tee /usr/local/bin/vrgb-gui > /dev/null <<EOF
 #!/usr/bin/env python3
 import sys
@@ -84,7 +85,11 @@ EOF
 
     echo "[Suite 2/3] Installing launcher and icon ..."
     sudo install -m 644 suite/data/vrgb-gui.desktop /usr/share/applications/vrgb-gui.desktop
-    sudo install -Dm644 suite/data/vrgb.svg /usr/share/icons/hicolor/scalable/apps/vrgb.svg
+    sudo rm -f /usr/share/icons/hicolor/scalable/apps/vrgb.svg
+    for size in 16 24 32 48 64 128 256; do
+        sudo install -Dm644 "suite/data/icons/${size}x${size}/vrgb.png" \
+            "/usr/share/icons/hicolor/${size}x${size}/apps/vrgb.png"
+    done
     sudo gtk-update-icon-cache -q -t /usr/share/icons/hicolor 2>/dev/null || true
     sudo update-desktop-database /usr/share/applications 2>/dev/null || true
 

@@ -125,16 +125,16 @@ PRESETS = [
 
 
 def make_logo_icon():
-    # Installed icon theme first (hicolor/scalable/apps/vrgb.svg), then the copy
-    # next to the package when running from a checkout.
-    ic = QIcon.fromTheme("vrgb")
-    if not ic.isNull():
-        return ic
-    cand = Path(__file__).resolve().parents[1] / "data" / "vrgb.svg"
+    # Prefer VRGB's bundled application icon so the window and tray always use
+    # the canonical branding. Fall back to the desktop icon theme if needed.
+    cand = Path(__file__).resolve().parents[1] / "data" / "vrgb.png"
     if cand.exists():
         ic = QIcon(str(cand))
         if not ic.isNull():
             return ic
+    ic = QIcon.fromTheme("vrgb")
+    if not ic.isNull():
+        return ic
     pm = QPixmap(64, 64)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)

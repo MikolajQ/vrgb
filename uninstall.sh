@@ -29,6 +29,9 @@ if [ -e /usr/local/bin/vrgb-gui ] || [ -d /usr/local/lib/vrgb-gui ]; then
     sudo rm -rf /usr/local/lib/vrgb-gui
     sudo rm -f /usr/local/bin/vrgb-gui /usr/share/applications/vrgb-gui.desktop \
         /usr/share/icons/hicolor/scalable/apps/vrgb.svg /usr/local/lib/systemd/user/vrgb-gui.service
+    for size in 16 24 32 48 64 128 256; do
+        sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/vrgb.png"
+    done
     rm -f ~/.config/autostart/vrgb-gui.desktop
 fi
 
